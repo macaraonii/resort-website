@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  font-family: 'Nunito Sans', sans-serif;
+  color: #0b2d4b;
+  background: linear-gradient(180deg, #e9f7ff 0%, #fffaf0 55%, #ffffff 100%);
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@keyframes floaty {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-12px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 100% 50%;
+  }
+}
+
+@layer components {
+  .section {
+    @apply px-6 py-16 sm:px-10 lg:px-20;
+  }
+
+  .glass-panel {
+    @apply rounded-3xl border border-white/60 bg-white/70 shadow-tropical backdrop-blur-xl;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-full bg-ocean-500 px-6 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-ocean-600;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-full border border-ocean-400 px-6 py-3 text-sm font-semibold text-ocean-700 transition hover:bg-ocean-50;
+  }
+
+  .tag {
+    @apply inline-flex items-center rounded-full bg-aqua-100 px-3 py-1 text-xs font-semibold text-ocean-700;
+  }
+}
+
+@layer utilities {
+  .floaty {
+    animation: floaty 6s ease-in-out infinite;
+  }
+
+  .gradient-sheen {
+    background: linear-gradient(120deg, #d7fbff, #fff4c2, #ffd24d);
+    background-size: 200% 200%;
+    animation: shimmer 8s ease-in-out infinite;
+  }
+}
