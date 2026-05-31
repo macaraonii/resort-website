@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  font-family: 'Space Grotesk', sans-serif;
+  color: #0f2a3a;
+  background-color: #f6f8fb;
+  background-image: radial-gradient(
+      1200px 520px at 90% -15%,
+      rgba(255, 191, 31, 0.25),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 420px at -10% 10%,
+      rgba(46, 168, 255, 0.25),
+      transparent 55%
+    ),
+    linear-gradient(180deg, #f6faff 0%, #eef6fb 45%, #fff6e3 100%);
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@keyframes floaty {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-12px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes wave-drift {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(-16px);
+  }
+}
+
+@keyframes rise-in {
+  0% {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes palm-sway {
+  0%,
+  100% {
+    transform: rotate(-1deg);
+  }
+  50% {
+    transform: rotate(2deg);
+  }
+}
+
+@layer components {
+  .section {
+    @apply px-6 py-16 sm:px-10 lg:px-20;
+  }
+
+  .glass-panel {
+    @apply rounded-3xl border border-white/70 bg-white/80 shadow-tropical backdrop-blur-xl;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-full px-6 py-3 text-sm font-semibold text-white shadow-md transition;
+    background: linear-gradient(120deg, #006fc4 0%, #35d4f6 100%);
+  }
+
+  .btn-primary:hover {
+    filter: brightness(0.95);
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-full border border-slate-300 px-6 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50;
+  }
+
+  .tag {
+    @apply inline-flex items-center rounded-full bg-aqua-100 px-3 py-1 text-xs font-semibold text-ocean-700;
+  }
+
+  .input-field {
+    @apply mt-2 w-full rounded-2xl border border-slate-200 bg-white/80 p-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-ocean-400 focus:ring-2 focus:ring-ocean-100;
+  }
+
+  .status-chip {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold;
+  }
+}
+
+@layer utilities {
+  .tropical-dots {
+    background-image: radial-gradient(
+      rgba(255, 255, 255, 0.45) 1px,
+      transparent 1px
+    );
+    background-size: 28px 28px;
+  }
+
+  .floaty {
+    animation: floaty 6s ease-in-out infinite;
+  }
+
+  .gradient-sheen {
+    background: linear-gradient(120deg, #d7fbff, #fff4c2, #ffd24d);
+    background-size: 200% 200%;
+    animation: shimmer 8s ease-in-out infinite;
+  }
+
+  .wave-drift {
+    animation: wave-drift 10s ease-in-out infinite;
+  }
+
+  .palm-sway {
+    animation: palm-sway 7s ease-in-out infinite;
+    transform-origin: bottom center;
+  }
+
+  .signal-grid {
+    background-image: linear-gradient(
+        90deg,
+        rgba(6, 89, 124, 0.06) 1px,
+        transparent 1px
+      ),
+      linear-gradient(
+        0deg,
+        rgba(6, 89, 124, 0.06) 1px,
+        transparent 1px
+      );
+    background-size: 36px 36px;
+  }
+
+  .rise-in {
+    animation: rise-in 0.6s ease-out both;
+  }
+
+  .rise-delay-1 {
+    animation-delay: 0.08s;
+  }
+
+  .rise-delay-2 {
+    animation-delay: 0.16s;
+  }
+
+  .rise-delay-3 {
+    animation-delay: 0.24s;
+  }
+}
