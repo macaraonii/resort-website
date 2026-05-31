@@ -1,78 +1,63 @@
 import { useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
-import { adminLogin } from '../api.js';
 
 export default function AdminLogin() {
   const navigate = useNavigate();
   const existingToken = localStorage.getItem('cw_admin_token');
-  const [form, setForm] = useState({ username: '', password: '' });
-  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   if (existingToken) {
-    return <Navigate to="/admin" replace />;
+    return <Navigate to="/" replace />;
   }
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    setError('');
     setLoading(true);
 
-    try {
-      const response = await adminLogin(form.username, form.password);
-      localStorage.setItem('cw_admin_token', response.token);
-      navigate('/admin');
-    } catch (err) {
-      setError(err.message || 'Login failed');
-    } finally {
-      setLoading(false);
-    }
+    localStorage.setItem('cw_admin_token', 'demo_admin');
+    navigate('/');
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-ocean-50 via-white to-sun-100 px-6 py-16">
-      <div className="mx-auto max-w-lg">
-        <div className="glass-panel p-8">
-          <h1 className="font-display text-3xl text-ocean-800">
-            Admin Login
+    <div className="min-h-screen px-6 py-16">
+      <div className="mx-auto grid max-w-5xl gap-12 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="self-center space-y-6">
+          <span className="tag">Safety Operations</span>
+          <h1 className="font-display text-4xl text-slate-900 sm:text-5xl">
+            Wristband Monitoring Access
           </h1>
-          <p className="mt-2 text-sm text-ocean-600">
-            Use the prototype admin credentials to access the dashboard.
+          <p className="text-sm text-slate-600">
+            Log in to manage wristband assignments, track guest safety, and
+            respond to live ESP32 alerts routed through Firebase.
           </p>
-          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-            <div>
-              <label className="text-xs font-semibold text-ocean-500">
-                Username
-              </label>
-              <input
-                type="text"
-                value={form.username}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, username: event.target.value }))
-                }
-                className="mt-2 w-full rounded-xl border border-ocean-100 p-3 text-sm"
-                placeholder="admin"
-              />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="glass-panel p-4">
+              <p className="text-xs font-semibold text-slate-500">
+                Live signal feed
+              </p>
+              <p className="mt-2 text-sm text-slate-700">
+                Monitor every alert broadcast from the wristbands in real time.
+              </p>
             </div>
-            <div>
-              <label className="text-xs font-semibold text-ocean-500">
-                Password
-              </label>
-              <input
-                type="password"
-                value={form.password}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, password: event.target.value }))
-                }
-                className="mt-2 w-full rounded-xl border border-ocean-100 p-3 text-sm"
-                placeholder="waves2026"
-              />
+            <div className="glass-panel p-4">
+              <p className="text-xs font-semibold text-slate-500">
+                Manual assignments
+              </p>
+              <p className="mt-2 text-sm text-slate-700">
+                Assign wristband numbers to guests and manage stays quickly.
+              </p>
             </div>
-            {error && (
-              <div className="rounded-2xl border border-coral-300 bg-white/80 p-3 text-sm text-coral-500">
-                {error}
-              </div>
-            )}
+          </div>
+        </div>
+
+        <div className="glass-panel p-8">
+          <h2 className="font-display text-2xl text-slate-900">
+            Admin sign in
+          </h2>
+          <p className="mt-2 text-sm text-slate-600">
+            Continue to the monitoring center.
+          </p>
+          <form onSubmit={handleSubmit} className="mt-6">
             <button type="submit" className="btn-primary w-full">
               {loading ? 'Signing in...' : 'Sign In'}
             </button>
