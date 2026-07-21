@@ -50,4 +50,5 @@ Credentials can be changed in server/.env (see server/.env.example).
 - The Vite config exposes the logo from res/ using public assets.
 - The database is created automatically in server/data/ on first run.
 - Sample rooms, cottages, and reservations are seeded for testing.
+- A Firestore-ready JSON seed file is available at `server/firestore-seed.json`.
 - Payment processing is a prototype only and does not charge real users.

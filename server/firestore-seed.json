@@ -1,0 +1,146 @@
+{
+  "rooms": [
+    {
+      "id": "room_1",
+      "name": "Hotel Room",
+      "price": 3000,
+      "capacity": "2-3 pax",
+      "description": "Cozy hotel room with a breezy garden view.",
+      "imageUrl": "https://images.unsplash.com/photo-1505691938895-1758d7feb511?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": "room_2",
+      "name": "Balistada Room",
+      "price": 3000,
+      "capacity": "4 pax",
+      "description": "Open layout room with tropical textures and comfort.",
+      "imageUrl": "https://images.unsplash.com/photo-1507089947368-19c1da9775ae?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": "room_3",
+      "name": "Queen Room",
+      "price": 6000,
+      "capacity": "10 pax",
+      "description": "Spacious suite ideal for big families and barkadas.",
+      "imageUrl": "https://images.unsplash.com/photo-1505691723518-36a5ac3be353?auto=format&fit=crop&w=900&q=80"
+    }
+  ],
+  "cottages": [
+    {
+      "id": "cottage_1",
+      "name": "Cottage A",
+      "price": 700,
+      "capacity": "3-8 pax",
+      "description": "Shaded cottage with fans and nearby splash zone access.",
+      "imageUrl": "https://images.unsplash.com/photo-1500375592092-40eb2168fd21?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": "cottage_2",
+      "name": "Cottage B",
+      "price": 1000,
+      "capacity": "10 pax",
+      "description": "Bigger cottage with picnic table and storage shelves.",
+      "imageUrl": "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": "cottage_3",
+      "name": "Cottage C",
+      "price": 1500,
+      "capacity": "15 pax",
+      "description": "Family cottage close to the wave pool and snack bar.",
+      "imageUrl": "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": "cottage_4",
+      "name": "Cottage D",
+      "price": 2500,
+      "capacity": "20-25 pax",
+      "description": "Large barkada cottage with exclusive chill-out area.",
+      "imageUrl": "https://images.unsplash.com/photo-1470246973918-29a93221c455?auto=format&fit=crop&w=900&q=80"
+    }
+  ],
+  "reservations": [
+    {
+      "id": "reservation_1",
+      "reference": "CW-000001",
+      "stayType": "Day Swimming",
+      "dateStart": "2026-06-14",
+      "dateEnd": "2026-06-14",
+      "guests": {
+        "adults": 2,
+        "kids": 1,
+        "seniors": 0,
+        "pwd": 0,
+        "total": 3
+      },
+      "accommodation": {
+        "type": "cottage",
+        "id": "cottage_1",
+        "name": "Cottage A",
+        "price": 700
+      },
+      "totals": {
+        "entranceSubtotal": 700,
+        "accommodationSubtotal": 700,
+        "totalAmount": 1400
+      },
+      "status": "Confirmed",
+      "guest": {
+        "fullName": "Alyssa Cruz",
+        "email": "alyssa.cruz@email.com",
+        "contactNumber": "09171234567",
+        "address": "Pulong Sampaloc, Bulacan",
+        "specialRequests": "Near the wave pool if possible",
+        "vehicles": 1
+      },
+      "payment": {
+        "method": "Pay at Resort",
+        "amount": 1400,
+        "status": "Pending",
+        "note": "Prototype payment record"
+      },
+      "createdAt": "2026-06-01T00:00:00.000Z"
+    },
+    {
+      "id": "reservation_2",
+      "reference": "CW-000002",
+      "stayType": "Overnight Swimming",
+      "dateStart": "2026-06-20",
+      "dateEnd": "2026-06-21",
+      "guests": {
+        "adults": 4,
+        "kids": 2,
+        "seniors": 1,
+        "pwd": 0,
+        "total": 7
+      },
+      "accommodation": {
+        "type": "room",
+        "id": "room_3",
+        "name": "Queen Room",
+        "price": 6000
+      },
+      "totals": {
+        "entranceSubtotal": 1950,
+        "accommodationSubtotal": 6000,
+        "totalAmount": 7950
+      },
+      "status": "Pending",
+      "guest": {
+        "fullName": "Marco Santos",
+        "email": "marco.santos@email.com",
+        "contactNumber": "09998887777",
+        "address": "Dona Remedios Trinidad, Bulacan",
+        "specialRequests": "Need extra towels",
+        "vehicles": 2
+      },
+      "payment": {
+        "method": "GCash",
+        "amount": 7950,
+        "status": "Pending",
+        "note": "Prototype payment record"
+      },
+      "createdAt": "2026-06-01T00:00:00.000Z"
+    }
+  ]
+}
