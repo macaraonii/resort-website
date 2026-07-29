@@ -47,40 +47,109 @@ const initialAssignments = [
   }
 ];
 
+// ---------------------------------------------------------------------------
+// Alert severity model
+//
+//   Minor    - Camera / wristband signals disagree, or a benign explanation
+//              (post-exercise heart rate) accounts for the reading.
+//   Major    - Camera and wristband both report abnormal signals together,
+//              OR the wristband alone reports a sustained abnormal reading
+//              while the camera view can't corroborate it.
+//   Critical - The wristband has confirmed an actual drowning event and
+//              deployed the CO2 airbag. Always treated as a real emergency,
+//              camera visibility is irrelevant.
+// ---------------------------------------------------------------------------
+
 const initialAlerts = [
   {
     id: 'AL-201',
     severity: 'Critical',
     wristbandNumber: 'CW-014',
     guestName: 'Amara Cruz',
-    message: 'Submersion detected for 12 seconds',
+    message: 'Drowning event confirmed by wristband sensors',
+    reason: 'CO2 airbag deployed',
     time: '10:16 AM',
     status: 'Open'
   },
   {
     id: 'AL-202',
-    severity: 'Warning',
+    severity: 'Major',
     wristbandNumber: 'CW-082',
     guestName: 'Luis Mateo',
-    message: 'Boundary breach near deep zone',
+    message: 'Repeated struggling with abnormal heart rate and erratic movement',
+    reason: 'Camera and wristband both flagged the guest',
     time: '10:03 AM',
     status: 'Acknowledged'
   },
   {
     id: 'AL-203',
-    severity: 'Advisory',
+    severity: 'Major',
+    wristbandNumber: 'CW-045',
+    guestName: 'Priya Nair',
+    message: 'Prolonged abnormal movement and water immersion detected',
+    reason: 'Camera view obstructed - wristband signal only',
+    time: '09:52 AM',
+    status: 'Open'
+  },
+  {
+    id: 'AL-204',
+    severity: 'Minor',
     wristbandNumber: 'CW-031',
     guestName: 'Hana Park',
-    message: 'Band signal lost for 45 seconds',
+    message: 'Camera flagged possible struggling near the shallow end',
+    reason: 'Camera / wristband mismatch - vitals read normal',
     time: '09:31 AM',
     status: 'Resolved'
+  },
+  {
+    id: 'AL-205',
+    severity: 'Minor',
+    wristbandNumber: 'CW-058',
+    guestName: 'Ethan Cole',
+    message: 'Elevated heart rate reading after a vigorous swim set',
+    reason: 'Camera shows normal behavior - likely post-activity spike',
+    time: '09:10 AM',
+    status: 'Resolved'
+  },
+  {
+    id: 'AL-206',
+    severity: 'Minor',
+    wristbandNumber: 'CW-014',
+    guestName: 'Amara Cruz',
+    message: 'Brief movement irregularity while entering the pool',
+    reason: 'Camera confirms normal, playful entry',
+    time: '08:58 AM',
+    status: 'Acknowledged'
   }
 ];
 
 const severityStyles = {
   Critical: 'bg-coral-500 text-white',
-  Warning: 'bg-sun-400 text-slate-900',
-  Advisory: 'bg-aqua-200 text-slate-800'
+  Major: 'bg-orange-400 text-white',
+  Minor: 'bg-sun-400 text-slate-900'
+};
+
+const severityOrder = { Critical: 0, Major: 1, Minor: 2 };
+
+const tabActiveStyles = {
+  All: 'bg-slate-900 text-white border-slate-900',
+  Minor: 'bg-sun-400 text-slate-900 border-sun-400',
+  Major: 'bg-orange-400 text-white border-orange-400',
+  Critical: 'bg-coral-500 text-white border-coral-500'
+};
+
+const tabBadgeStyles = {
+  All: 'bg-white/20 text-white',
+  Minor: 'bg-slate-900/10 text-slate-900',
+  Major: 'bg-white/25 text-white',
+  Critical: 'bg-white/25 text-white'
+};
+
+const inactiveTabBadgeStyles = {
+  All: 'bg-slate-100 text-slate-500',
+  Minor: 'bg-sun-100 text-sun-600',
+  Major: 'bg-orange-100 text-orange-600',
+  Critical: 'bg-coral-100 text-coral-600'
 };
 
 const alertStatusStyles = {
@@ -93,6 +162,14 @@ const assignmentStatusStyles = {
   Active: 'bg-aqua-200 text-ocean-800',
   Returned: 'bg-slate-200 text-slate-600'
 };
+
+const severityTabs = ['All', 'Minor', 'Major', 'Critical'];
+
+const mainTabs = [
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'wristbands', label: 'Wristband Management' },
+  { id: 'alerts', label: 'Alert Logs' }
+];
 
 const formatStayRange = (start, end) => {
   if (!start || !end) {
@@ -117,6 +194,8 @@ export default function AdminDashboard() {
   const [assignments, setAssignments] = useState(initialAssignments);
   const [alerts, setAlerts] = useState(initialAlerts);
   const [search, setSearch] = useState('');
+  const [activeAlertTab, setActiveAlertTab] = useState('All');
+  const [activeMainTab, setActiveMainTab] = useState('dashboard');
   const [form, setForm] = useState({
     guestName: '',
     age: '',
@@ -168,6 +247,28 @@ export default function AdminDashboard() {
       acknowledged
     };
   }, [assignments, alerts]);
+
+  const alertCounts = useMemo(() => {
+    return {
+      All: alerts.length,
+      Minor: alerts.filter((alert) => alert.severity === 'Minor').length,
+      Major: alerts.filter((alert) => alert.severity === 'Major').length,
+      Critical: alerts.filter((alert) => alert.severity === 'Critical').length
+    };
+  }, [alerts]);
+
+  const filteredAlerts = useMemo(() => {
+    if (activeAlertTab === 'All') {
+      return alerts;
+    }
+    return alerts.filter((alert) => alert.severity === activeAlertTab);
+  }, [alerts, activeAlertTab]);
+
+  const openAlertsPreview = useMemo(() => {
+    return alerts
+      .filter((alert) => alert.status !== 'Resolved')
+      .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+  }, [alerts]);
 
   const handleAssign = (event) => {
     event.preventDefault();
@@ -279,58 +380,176 @@ export default function AdminDashboard() {
         </div>
       </header>
 
-      <main className="section space-y-8">
-        <section className="grid gap-6 lg:grid-cols-4">
-          <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in">
-            <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-aqua-200/70 blur-2xl" />
-            <p className="text-xs font-semibold text-slate-500">
-              Active wristbands
-            </p>
-            <p className="mt-4 font-display text-3xl text-slate-900">
-              {totals.active}
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              {assignments.length} total assignments tracked
-            </p>
-          </div>
-          <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-1">
-            <div className="absolute -right-6 -top-10 h-20 w-20 rounded-full bg-sun-200/60 blur-2xl" />
-            <p className="text-xs font-semibold text-slate-500">Open alerts</p>
-            <p className="mt-4 font-display text-3xl text-slate-900">
-              {totals.openAlerts}
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              {totals.criticalAlerts} critical right now
-            </p>
-          </div>
-          <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-2">
-            <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-coral-300/40 blur-2xl" />
-            <p className="text-xs font-semibold text-slate-500">
-              Acknowledged alerts
-            </p>
-            <p className="mt-4 font-display text-3xl text-slate-900">
-              {totals.acknowledged}
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              Waiting for resolution updates
-            </p>
-          </div>
-          <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-3">
-            <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-ocean-100/70 blur-2xl" />
-            <p className="text-xs font-semibold text-slate-500">
-              Wristbands returned
-            </p>
-            <p className="mt-4 font-display text-3xl text-slate-900">
-              {totals.returned}
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              Completed guest check-outs
-            </p>
-          </div>
-        </section>
+      {/* Top-level tab navigation */}
+      <nav className="sticky top-0 z-10 border-b border-white/60 bg-white/80 backdrop-blur">
+        <div className="mx-auto flex flex-wrap gap-1 px-6 sm:px-10 lg:px-20">
+          {mainTabs.map((tab) => {
+            const isActive = activeMainTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveMainTab(tab.id)}
+                className={`relative flex items-center gap-2 px-4 py-3.5 text-sm font-semibold transition ${
+                  isActive
+                    ? 'text-slate-900'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {tab.label}
+                {tab.id === 'alerts' && totals.openAlerts > 0 && (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                      totals.criticalAlerts > 0
+                        ? 'bg-coral-500 text-white'
+                        : 'bg-sun-400 text-slate-900'
+                    }`}
+                  >
+                    {totals.openAlerts}
+                  </span>
+                )}
+                <span
+                  className={`absolute inset-x-3 -bottom-px h-0.5 rounded-full transition ${
+                    isActive ? 'bg-slate-900' : 'bg-transparent'
+                  }`}
+                />
+              </button>
+            );
+          })}
+        </div>
+      </nav>
 
-        <section className="grid gap-8 lg:grid-cols-[1.05fr_1.35fr]">
-          <div className="space-y-6">
+      <main className="section space-y-8">
+        {activeMainTab === 'dashboard' && (
+          <>
+            <section className="grid gap-6 lg:grid-cols-4">
+              <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in">
+                <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-aqua-200/70 blur-2xl" />
+                <p className="text-xs font-semibold text-slate-500">
+                  Active wristbands
+                </p>
+                <p className="mt-4 font-display text-3xl text-slate-900">
+                  {totals.active}
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  {assignments.length} total assignments tracked
+                </p>
+              </div>
+              <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-1">
+                <div className="absolute -right-6 -top-10 h-20 w-20 rounded-full bg-sun-200/60 blur-2xl" />
+                <p className="text-xs font-semibold text-slate-500">Open alerts</p>
+                <p className="mt-4 font-display text-3xl text-slate-900">
+                  {totals.openAlerts}
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  {totals.criticalAlerts} critical right now
+                </p>
+              </div>
+              <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-2">
+                <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-coral-300/40 blur-2xl" />
+                <p className="text-xs font-semibold text-slate-500">
+                  Acknowledged alerts
+                </p>
+                <p className="mt-4 font-display text-3xl text-slate-900">
+                  {totals.acknowledged}
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  Waiting for resolution updates
+                </p>
+              </div>
+              <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-3">
+                <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-ocean-100/70 blur-2xl" />
+                <p className="text-xs font-semibold text-slate-500">
+                  Wristbands returned
+                </p>
+                <p className="mt-4 font-display text-3xl text-slate-900">
+                  {totals.returned}
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  Completed guest check-outs
+                </p>
+              </div>
+            </section>
+
+            <section className="glass-panel p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500">
+                    Quick overview
+                  </p>
+                  <h2 className="mt-2 font-display text-2xl text-slate-900">
+                    Live &amp; open emergencies
+                  </h2>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Unresolved alerts only, sorted by severity. Full history lives
+                    in Alert Logs.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveMainTab('alerts')}
+                  className="rounded-full border border-slate-200 px-4 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                >
+                  View all in Alert Logs
+                </button>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                {openAlertsPreview.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
+                    No open or acknowledged alerts. All clear.
+                  </div>
+                ) : (
+                  openAlertsPreview.map((alert) => (
+                    <div
+                      key={alert.id}
+                      className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-slate-200/60 bg-white/80 p-4"
+                    >
+                      <div className="flex items-start gap-3">
+                        <span
+                          className={`status-chip ${
+                            severityStyles[alert.severity]
+                          }`}
+                        >
+                          {alert.severity}
+                        </span>
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">
+                            {alert.guestName}
+                            <span className="ml-2 text-xs font-normal text-slate-500">
+                              {alert.wristbandNumber}
+                            </span>
+                          </p>
+                          <p className="mt-1 text-xs text-slate-600">
+                            {alert.message}
+                          </p>
+                          <p className="mt-1 text-[11px] italic text-slate-400">
+                            {alert.reason}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-2">
+                        <span
+                          className={`status-chip ${
+                            alertStatusStyles[alert.status]
+                          }`}
+                        >
+                          {alert.status}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          {alert.time}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </>
+        )}
+
+        {activeMainTab === 'wristbands' && (
+          <section className="grid gap-8 lg:grid-cols-[1fr_1.2fr]">
             <div className="glass-panel p-6">
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -522,124 +741,155 @@ export default function AdminDashboard() {
                 )}
               </div>
             </div>
-          </div>
+          </section>
+        )}
 
-          <div className="space-y-6">
-            <div className="glass-panel p-6">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <p className="text-xs font-semibold text-slate-500">
-                    Alert logs
-                  </p>
-                  <h2 className="mt-2 font-display text-2xl text-slate-900">
-                    Live wristband alerts
-                  </h2>
-                  <p className="mt-2 text-xs text-slate-500">
-                    Streaming from Firebase and prioritized by severity.
-                  </p>
-                </div>
-                <div className="status-chip bg-slate-900/5 text-slate-600">
-                  Live feed
-                </div>
+        {activeMainTab === 'alerts' && (
+          <section className="glass-panel p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold text-slate-500">
+                  Alert logs
+                </p>
+                <h2 className="mt-2 font-display text-2xl text-slate-900">
+                  Live wristband alerts
+                </h2>
+                <p className="mt-2 text-xs text-slate-500">
+                  Streaming from Firebase and prioritized by severity.
+                </p>
               </div>
+              <div className="status-chip bg-slate-900/5 text-slate-600">
+                Live feed
+              </div>
+            </div>
 
-              {alerts.length === 0 ? (
-                <div className="mt-6 rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-                  No alerts yet. Wristband events will appear here.
-                </div>
-              ) : (
-                <div className="mt-6 overflow-x-auto">
-                  <table className="w-full min-w-[640px] text-left text-sm">
-                    <thead className="text-xs uppercase text-slate-400">
-                      <tr>
-                        <th className="pb-3 pr-4">Severity</th>
-                        <th className="pb-3 pr-4">Guest</th>
-                        <th className="pb-3 pr-4">Alert</th>
-                        <th className="pb-3 pr-4">Time</th>
-                        <th className="pb-3 pr-4">Status</th>
-                        <th className="pb-3 text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-slate-600">
-                      {alerts.map((alert) => (
-                        <tr
-                          key={alert.id}
-                          className="border-t border-slate-200/60"
-                        >
-                          <td className="py-3 pr-4">
-                            <span
-                              className={`status-chip ${
-                                severityStyles[alert.severity]
-                              }`}
-                            >
-                              {alert.severity}
-                            </span>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <p className="text-sm font-semibold text-slate-900">
-                              {alert.guestName}
-                            </p>
-                            <p className="text-xs text-slate-500">
-                              {alert.wristbandNumber}
-                            </p>
-                          </td>
-                          <td className="py-3 pr-4 text-xs text-slate-600">
-                            {alert.message}
-                          </td>
-                          <td className="py-3 pr-4 text-xs text-slate-600">
-                            {alert.time}
-                          </td>
-                          <td className="py-3 pr-4">
-                            <span
-                              className={`status-chip ${
-                                alertStatusStyles[alert.status]
-                              }`}
-                            >
-                              {alert.status}
-                            </span>
-                          </td>
-                          <td className="py-3 text-right">
-                            {alert.status !== 'Resolved' ? (
-                              <div className="flex justify-end gap-2">
-                                {alert.status === 'Open' && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleAlertStatus(
-                                        alert.id,
-                                        'Acknowledged'
-                                      )
-                                    }
-                                    className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
-                                  >
-                                    Acknowledge
-                                  </button>
-                                )}
+            {/* Severity filter tabs */}
+            <div className="mt-5 flex flex-wrap gap-2">
+              {severityTabs.map((tab) => {
+                const isActive = activeAlertTab === tab;
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setActiveAlertTab(tab)}
+                    className={`flex items-center gap-2 rounded-full border px-4 py-1.5 text-xs font-semibold transition ${
+                      isActive
+                        ? tabActiveStyles[tab]
+                        : 'border-slate-200 bg-white/70 text-slate-500 hover:bg-slate-50'
+                    }`}
+                  >
+                    {tab}
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                        isActive
+                          ? tabBadgeStyles[tab]
+                          : inactiveTabBadgeStyles[tab]
+                      }`}
+                    >
+                      {alertCounts[tab]}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {filteredAlerts.length === 0 ? (
+              <div className="mt-6 rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
+                No {activeAlertTab !== 'All' ? activeAlertTab.toLowerCase() : ''}{' '}
+                alerts to show right now.
+              </div>
+            ) : (
+              <div className="mt-6 overflow-x-auto">
+                <table className="w-full min-w-[640px] text-left text-sm">
+                  <thead className="text-xs uppercase text-slate-400">
+                    <tr>
+                      <th className="pb-3 pr-4">Severity</th>
+                      <th className="pb-3 pr-4">Guest</th>
+                      <th className="pb-3 pr-4">Alert</th>
+                      <th className="pb-3 pr-4">Time</th>
+                      <th className="pb-3 pr-4">Status</th>
+                      <th className="pb-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-slate-600">
+                    {filteredAlerts.map((alert) => (
+                      <tr
+                        key={alert.id}
+                        className="border-t border-slate-200/60"
+                      >
+                        <td className="py-3 pr-4 align-top">
+                          <span
+                            className={`status-chip ${
+                              severityStyles[alert.severity]
+                            }`}
+                          >
+                            {alert.severity}
+                          </span>
+                        </td>
+                        <td className="py-3 pr-4 align-top">
+                          <p className="text-sm font-semibold text-slate-900">
+                            {alert.guestName}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {alert.wristbandNumber}
+                          </p>
+                        </td>
+                        <td className="py-3 pr-4 align-top text-xs text-slate-600">
+                          <p title={alert.reason}>{alert.message}</p>
+                          <p className="mt-1 cursor-help text-[11px] italic text-slate-400">
+                            {alert.reason}
+                          </p>
+                        </td>
+                        <td className="py-3 pr-4 align-top text-xs text-slate-600">
+                          {alert.time}
+                        </td>
+                        <td className="py-3 pr-4 align-top">
+                          <span
+                            className={`status-chip ${
+                              alertStatusStyles[alert.status]
+                            }`}
+                          >
+                            {alert.status}
+                          </span>
+                        </td>
+                        <td className="py-3 text-right align-top">
+                          {alert.status !== 'Resolved' ? (
+                            <div className="flex justify-end gap-2">
+                              {alert.status === 'Open' && (
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleAlertStatus(alert.id, 'Resolved')
+                                    handleAlertStatus(alert.id, 'Acknowledged')
                                   }
-                                  className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
+                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
                                 >
-                                  Resolve
+                                  Acknowledge
                                 </button>
-                              </div>
-                            ) : (
-                              <span className="text-xs text-slate-400">
-                                Resolved
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleAlertStatus(alert.id, 'Resolved')
+                                }
+                                className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
+                              >
+                                Resolve
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-400">
+                              Resolved
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
       </main>
     </div>
   );
