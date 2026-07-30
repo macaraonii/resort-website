@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Navigate } from 'react-router-dom';
+import { onValue, push, ref, set, update } from 'firebase/database';
+import { db } from '../config/firebase';
 
 const stayFormatter = new Intl.DateTimeFormat('en-US', {
   month: 'short',
@@ -10,42 +12,6 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
   hour: 'numeric',
   minute: '2-digit'
 });
-
-const initialAssignments = [
-  {
-    id: 'WB-230',
-    guestName: 'Amara Cruz',
-    age: 9,
-    stayStart: '2026-05-18',
-    stayEnd: '2026-05-18',
-    wristbandNumber: 'CW-014',
-    status: 'Active',
-    assignedAt: '2026-05-18T09:12:00',
-    lastSeen: '2026-05-18T10:14:00'
-  },
-  {
-    id: 'WB-231',
-    guestName: 'Luis Mateo',
-    age: 14,
-    stayStart: '2026-05-18',
-    stayEnd: '2026-05-19',
-    wristbandNumber: 'CW-082',
-    status: 'Active',
-    assignedAt: '2026-05-18T09:25:00',
-    lastSeen: '2026-05-18T10:02:00'
-  },
-  {
-    id: 'WB-232',
-    guestName: 'Hana Park',
-    age: 6,
-    stayStart: '2026-05-18',
-    stayEnd: '2026-05-18',
-    wristbandNumber: 'CW-031',
-    status: 'Returned',
-    assignedAt: '2026-05-18T08:40:00',
-    lastSeen: '2026-05-18T09:30:00'
-  }
-];
 
 // ---------------------------------------------------------------------------
 // Alert severity model
@@ -59,69 +25,6 @@ const initialAssignments = [
 //              deployed the CO2 airbag. Always treated as a real emergency,
 //              camera visibility is irrelevant.
 // ---------------------------------------------------------------------------
-
-const initialAlerts = [
-  {
-    id: 'AL-201',
-    severity: 'Critical',
-    wristbandNumber: 'CW-014',
-    guestName: 'Amara Cruz',
-    message: 'Drowning event confirmed by wristband sensors',
-    reason: 'CO2 airbag deployed',
-    time: '10:16 AM',
-    status: 'Open'
-  },
-  {
-    id: 'AL-202',
-    severity: 'Major',
-    wristbandNumber: 'CW-082',
-    guestName: 'Luis Mateo',
-    message: 'Repeated struggling with abnormal heart rate and erratic movement',
-    reason: 'Camera and wristband both flagged the guest',
-    time: '10:03 AM',
-    status: 'Acknowledged'
-  },
-  {
-    id: 'AL-203',
-    severity: 'Major',
-    wristbandNumber: 'CW-045',
-    guestName: 'Priya Nair',
-    message: 'Prolonged abnormal movement and water immersion detected',
-    reason: 'Camera view obstructed - wristband signal only',
-    time: '09:52 AM',
-    status: 'Open'
-  },
-  {
-    id: 'AL-204',
-    severity: 'Minor',
-    wristbandNumber: 'CW-031',
-    guestName: 'Hana Park',
-    message: 'Camera flagged possible struggling near the shallow end',
-    reason: 'Camera / wristband mismatch - vitals read normal',
-    time: '09:31 AM',
-    status: 'Resolved'
-  },
-  {
-    id: 'AL-205',
-    severity: 'Minor',
-    wristbandNumber: 'CW-058',
-    guestName: 'Ethan Cole',
-    message: 'Elevated heart rate reading after a vigorous swim set',
-    reason: 'Camera shows normal behavior - likely post-activity spike',
-    time: '09:10 AM',
-    status: 'Resolved'
-  },
-  {
-    id: 'AL-206',
-    severity: 'Minor',
-    wristbandNumber: 'CW-014',
-    guestName: 'Amara Cruz',
-    message: 'Brief movement irregularity while entering the pool',
-    reason: 'Camera confirms normal, playful entry',
-    time: '08:58 AM',
-    status: 'Acknowledged'
-  }
-];
 
 const severityStyles = {
   Critical: 'bg-coral-500 text-white',
@@ -189,10 +92,25 @@ const formatTime = (value) => {
   return timeFormatter.format(new Date(value));
 };
 
+// Firebase Realtime Database stores each collection as an object keyed by
+// its push id (or whatever key it was written under), not as an array.
+// This turns { key1: {...}, key2: {...} } into [{ id: key1, ... }, ...],
+// and returns an empty array when the path is empty/null.
+const snapshotToArray = (snapshotValue) => {
+  if (!snapshotValue) {
+    return [];
+  }
+
+  return Object.entries(snapshotValue).map(([id, value]) => ({
+    id,
+    ...value
+  }));
+};
+
 export default function AdminDashboard() {
   const token = localStorage.getItem('cw_admin_token');
-  const [assignments, setAssignments] = useState(initialAssignments);
-  const [alerts, setAlerts] = useState(initialAlerts);
+  const [assignments, setAssignments] = useState([]);
+  const [alerts, setAlerts] = useState([]);
   const [search, setSearch] = useState('');
   const [activeAlertTab, setActiveAlertTab] = useState('All');
   const [activeMainTab, setActiveMainTab] = useState('dashboard');
@@ -204,7 +122,29 @@ export default function AdminDashboard() {
     wristbandNumber: ''
   });
   const [formError, setFormError] = useState('');
-  const [lastSync] = useState(() => new Date().toISOString());
+  const [lastSync, setLastSync] = useState(() => new Date().toISOString());
+
+  // Live listener: /assignments
+  useEffect(() => {
+    const assignmentsRef = ref(db, 'assignments');
+    const unsubscribe = onValue(assignmentsRef, (snapshot) => {
+      setAssignments(snapshotToArray(snapshot.val()));
+      setLastSync(new Date().toISOString());
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Live listener: /alerts
+  useEffect(() => {
+    const alertsRef = ref(db, 'alerts');
+    const unsubscribe = onValue(alertsRef, (snapshot) => {
+      setAlerts(snapshotToArray(snapshot.val()));
+      setLastSync(new Date().toISOString());
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const activeAssignments = useMemo(
     () => assignments.filter((item) => item.status === 'Active'),
@@ -270,7 +210,7 @@ export default function AdminDashboard() {
       .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
   }, [alerts]);
 
-  const handleAssign = (event) => {
+  const handleAssign = async (event) => {
     event.preventDefault();
     setFormError('');
 
@@ -312,7 +252,6 @@ export default function AdminDashboard() {
 
     const now = new Date();
     const newAssignment = {
-      id: `WB-${now.getTime()}`,
       guestName,
       age: ageValue,
       stayStart: form.stayStart,
@@ -323,30 +262,39 @@ export default function AdminDashboard() {
       lastSeen: now.toISOString()
     };
 
-    setAssignments((prev) => [newAssignment, ...prev]);
-    setForm({
-      guestName: '',
-      age: '',
-      stayStart: '',
-      stayEnd: '',
-      wristbandNumber: ''
-    });
+    try {
+      const assignmentsRef = ref(db, 'assignments');
+      const newAssignmentRef = push(assignmentsRef);
+      await set(newAssignmentRef, newAssignment);
+
+      setForm({
+        guestName: '',
+        age: '',
+        stayStart: '',
+        stayEnd: '',
+        wristbandNumber: ''
+      });
+    } catch (error) {
+      setFormError('Could not save the assignment to Firebase. Try again.');
+    }
   };
 
-  const handleReturn = (id) => {
-    setAssignments((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, status: 'Returned' } : item
-      )
-    );
+  const handleReturn = async (id) => {
+    try {
+      await update(ref(db, `assignments/${id}`), { status: 'Returned' });
+    } catch (error) {
+      // Live listener is the source of truth, so on failure the UI simply
+      // stays in sync with whatever is actually in the database.
+      console.error('Failed to mark assignment as returned:', error);
+    }
   };
 
-  const handleAlertStatus = (id, status) => {
-    setAlerts((prev) =>
-      prev.map((alert) =>
-        alert.id === id ? { ...alert, status } : alert
-      )
-    );
+  const handleAlertStatus = async (id, status) => {
+    try {
+      await update(ref(db, `alerts/${id}`), { status });
+    } catch (error) {
+      console.error('Failed to update alert status:', error);
+    }
   };
 
   const handleLogout = () => {
