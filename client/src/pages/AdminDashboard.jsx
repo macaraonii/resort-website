@@ -55,12 +55,6 @@ const inactiveTabBadgeStyles = {
   Critical: 'bg-coral-100 text-coral-600'
 };
 
-const alertStatusStyles = {
-  Open: 'bg-coral-300/20 text-coral-500',
-  Acknowledged: 'bg-sun-200/70 text-sun-500',
-  Resolved: 'bg-aqua-200/70 text-ocean-700'
-};
-
 const assignmentStatusStyles = {
   Active: 'bg-aqua-200 text-ocean-800',
   Returned: 'bg-slate-200 text-slate-600'
@@ -92,19 +86,93 @@ const formatTime = (value) => {
   return timeFormatter.format(new Date(value));
 };
 
+const firebasePushChars = '-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz';
+
+const firebaseKeyToDate = (key) => {
+  if (!key || key.length < 8) {
+    return null;
+  }
+
+  let timestamp = 0;
+
+  for (let index = 0; index < 8; index += 1) {
+    const charIndex = firebasePushChars.indexOf(key[index]);
+    if (charIndex === -1) {
+      return null;
+    }
+
+    timestamp = timestamp * 64 + charIndex;
+  }
+
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatAlertTime = (alert) => {
+  const rawTime = alert.readAt ?? alert.enteredAt ?? alert.createdAt ?? alert.timestamp ?? alert.time;
+  if (rawTime) {
+    return formatTime(rawTime);
+  }
+
+  const derivedTime = firebaseKeyToDate(alert.alertID ?? alert.id);
+  return derivedTime ? timeFormatter.format(derivedTime) : '---';
+};
+
+const getAlertSortTime = (alert) => {
+  const rawTime = alert.readAt ?? alert.enteredAt ?? alert.createdAt ?? alert.timestamp ?? alert.time;
+  if (rawTime) {
+    const timeValue = new Date(rawTime).getTime();
+    return Number.isNaN(timeValue) ? 0 : timeValue;
+  }
+
+  const derivedTime = firebaseKeyToDate(alert.alertID ?? alert.id);
+  return derivedTime ? derivedTime.getTime() : 0;
+};
+
+const normalizeAlertRecord = (id, value, readAt) => {
+  const alertID = value?.alertID ?? id;
+  const alertLevel = value?.alertLevel ?? value?.severity ?? 'Unknown';
+
+  return {
+    id: alertID,
+    alertID,
+    alertLevel,
+    guestName: value?.guestName ?? '',
+    cause: value?.cause ?? value?.message ?? '',
+    readAt,
+    enteredAt: value?.enteredAt ?? value?.createdAt ?? value?.timestamp ?? value?.time ?? null,
+    ...value
+  };
+};
+
 // Firebase Realtime Database stores each collection as an object keyed by
 // its push id (or whatever key it was written under), not as an array.
 // This turns { key1: {...}, key2: {...} } into [{ id: key1, ... }, ...],
 // and returns an empty array when the path is empty/null.
-const snapshotToArray = (snapshotValue) => {
+const snapshotToArray = (snapshotValue, readAt = new Date().toISOString()) => {
   if (!snapshotValue) {
     return [];
   }
 
-  return Object.entries(snapshotValue).map(([id, value]) => ({
-    id,
-    ...value
-  }));
+  return Object.entries(snapshotValue).map(([id, value]) =>
+    normalizeAlertRecord(id, value, readAt)
+  );
+};
+
+const persistMissingAlertReadTimes = async (snapshotValue, readAt) => {
+  if (!snapshotValue) {
+    return;
+  }
+
+  const missingReadTimes = Object.entries(snapshotValue).filter(([, value]) => !value?.readAt);
+
+  if (missingReadTimes.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    missingReadTimes.map(([id]) => update(ref(db, `alerts/${id}`), { readAt }))
+  );
 };
 
 export default function AdminDashboard() {
@@ -139,7 +207,11 @@ export default function AdminDashboard() {
   useEffect(() => {
     const alertsRef = ref(db, 'alerts');
     const unsubscribe = onValue(alertsRef, (snapshot) => {
-      setAlerts(snapshotToArray(snapshot.val()));
+      const readAt = new Date().toISOString();
+      const snapshotValue = snapshot.val();
+
+      setAlerts(snapshotToArray(snapshotValue, readAt));
+      void persistMissingAlertReadTimes(snapshotValue, readAt);
       setLastSync(new Date().toISOString());
     });
 
@@ -168,46 +240,41 @@ export default function AdminDashboard() {
     const active = assignments.filter((item) => item.status === 'Active').length;
     const returned = assignments.filter((item) => item.status === 'Returned')
       .length;
-    const openAlerts = alerts.filter(
-      (alert) => alert.status !== 'Resolved'
-    ).length;
-    const criticalAlerts = alerts.filter(
-      (alert) =>
-        alert.status !== 'Resolved' && alert.severity === 'Critical'
-    ).length;
-    const acknowledged = alerts.filter(
-      (alert) => alert.status === 'Acknowledged'
-    ).length;
+    const minorAlerts = alerts.filter((alert) => alert.alertLevel === 'Minor').length;
+    const majorAlerts = alerts.filter((alert) => alert.alertLevel === 'Major').length;
+    const criticalAlerts = alerts.filter((alert) => alert.alertLevel === 'Critical').length;
 
     return {
       active,
       returned,
-      openAlerts,
+      totalAlerts: alerts.length,
+      minorAlerts,
+      majorAlerts,
       criticalAlerts,
-      acknowledged
     };
   }, [assignments, alerts]);
 
   const alertCounts = useMemo(() => {
     return {
       All: alerts.length,
-      Minor: alerts.filter((alert) => alert.severity === 'Minor').length,
-      Major: alerts.filter((alert) => alert.severity === 'Major').length,
-      Critical: alerts.filter((alert) => alert.severity === 'Critical').length
+      Minor: alerts.filter((alert) => alert.alertLevel === 'Minor').length,
+      Major: alerts.filter((alert) => alert.alertLevel === 'Major').length,
+      Critical: alerts.filter((alert) => alert.alertLevel === 'Critical').length
     };
   }, [alerts]);
 
   const filteredAlerts = useMemo(() => {
-    if (activeAlertTab === 'All') {
-      return alerts;
-    }
-    return alerts.filter((alert) => alert.severity === activeAlertTab);
+    const scopedAlerts = activeAlertTab === 'All'
+      ? alerts
+      : alerts.filter((alert) => alert.alertLevel === activeAlertTab);
+
+    return [...scopedAlerts].sort((a, b) => getAlertSortTime(b) - getAlertSortTime(a));
   }, [alerts, activeAlertTab]);
 
   const openAlertsPreview = useMemo(() => {
-    return alerts
-      .filter((alert) => alert.status !== 'Resolved')
-      .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+    return [...alerts].sort(
+      (a, b) => getAlertSortTime(b) - getAlertSortTime(a)
+    );
   }, [alerts]);
 
   const handleAssign = async (event) => {
@@ -289,14 +356,6 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleAlertStatus = async (id, status) => {
-    try {
-      await update(ref(db, `alerts/${id}`), { status });
-    } catch (error) {
-      console.error('Failed to update alert status:', error);
-    }
-  };
-
   const handleLogout = () => {
     localStorage.removeItem('cw_admin_token');
     window.location.href = '/login';
@@ -374,47 +433,43 @@ export default function AdminDashboard() {
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in">
                 <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-aqua-200/70 blur-2xl" />
                 <p className="text-xs font-semibold text-slate-500">
-                  Active wristbands
+                  Total alerts
                 </p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
-                  {totals.active}
+                  {totals.totalAlerts}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  {assignments.length} total assignments tracked
+                  Read from the Firebase alerts table
                 </p>
               </div>
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-1">
                 <div className="absolute -right-6 -top-10 h-20 w-20 rounded-full bg-sun-200/60 blur-2xl" />
-                <p className="text-xs font-semibold text-slate-500">Open alerts</p>
+                <p className="text-xs font-semibold text-slate-500">Minor alerts</p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
-                  {totals.openAlerts}
+                  {totals.minorAlerts}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  {totals.criticalAlerts} critical right now
+                  Lowest severity level in the feed
                 </p>
               </div>
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-2">
                 <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-coral-300/40 blur-2xl" />
-                <p className="text-xs font-semibold text-slate-500">
-                  Acknowledged alerts
-                </p>
+                <p className="text-xs font-semibold text-slate-500">Major alerts</p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
-                  {totals.acknowledged}
+                  {totals.majorAlerts}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  Waiting for resolution updates
+                  Mid-level alerts in the log
                 </p>
               </div>
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-3">
                 <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-ocean-100/70 blur-2xl" />
-                <p className="text-xs font-semibold text-slate-500">
-                  Wristbands returned
-                </p>
+                <p className="text-xs font-semibold text-slate-500">Critical alerts</p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
-                  {totals.returned}
+                  {totals.criticalAlerts}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  Completed guest check-outs
+                  Highest severity level in the feed
                 </p>
               </div>
             </section>
@@ -426,11 +481,10 @@ export default function AdminDashboard() {
                     Quick overview
                   </p>
                   <h2 className="mt-2 font-display text-2xl text-slate-900">
-                    Live &amp; open emergencies
+                    Latest alerts from Firebase
                   </h2>
                   <p className="mt-2 text-xs text-slate-500">
-                    Unresolved alerts only, sorted by severity. Full history lives
-                    in Alert Logs.
+                    Sorted by severity and pulled directly from the alerts table.
                   </p>
                 </div>
                 <button
@@ -438,14 +492,14 @@ export default function AdminDashboard() {
                   onClick={() => setActiveMainTab('alerts')}
                   className="rounded-full border border-slate-200 px-4 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
                 >
-                  View all in Alert Logs
+                  View alert log
                 </button>
               </div>
 
               <div className="mt-6 space-y-3">
                 {openAlertsPreview.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-                    No open or acknowledged alerts. All clear.
+                    No alerts in Firebase yet.
                   </div>
                 ) : (
                   openAlertsPreview.map((alert) => (
@@ -456,38 +510,26 @@ export default function AdminDashboard() {
                       <div className="flex items-start gap-3">
                         <span
                           className={`status-chip ${
-                            severityStyles[alert.severity]
+                            severityStyles[alert.alertLevel]
                           }`}
                         >
-                          {alert.severity}
+                          {alert.alertLevel}
                         </span>
                         <div>
                           <p className="text-sm font-semibold text-slate-900">
                             {alert.guestName}
                             <span className="ml-2 text-xs font-normal text-slate-500">
-                              {alert.wristbandNumber}
+                              {alert.alertID}
                             </span>
                           </p>
                           <p className="mt-1 text-xs text-slate-600">
-                            {alert.message}
-                          </p>
-                          <p className="mt-1 text-[11px] italic text-slate-400">
-                            {alert.reason}
+                            {alert.cause}
                           </p>
                         </div>
                       </div>
-                      <div className="flex flex-col items-end gap-2">
-                        <span
-                          className={`status-chip ${
-                            alertStatusStyles[alert.status]
-                          }`}
-                        >
-                          {alert.status}
-                        </span>
-                        <span className="text-xs text-slate-500">
-                          {alert.time}
-                        </span>
-                      </div>
+                      <span className="text-xs text-slate-500">
+                        {formatAlertTime(alert)}
+                      </span>
                     </div>
                   ))
                 )}
@@ -700,10 +742,10 @@ export default function AdminDashboard() {
                   Alert logs
                 </p>
                 <h2 className="mt-2 font-display text-2xl text-slate-900">
-                  Live wristband alerts
+                  Firebase alert table
                 </h2>
                 <p className="mt-2 text-xs text-slate-500">
-                  Streaming from Firebase and prioritized by severity.
+                  Displaying alertID, alertLevel, cause, guestName, and the row timestamp.
                 </p>
               </div>
               <div className="status-chip bg-slate-900/5 text-slate-600">
@@ -751,12 +793,11 @@ export default function AdminDashboard() {
                 <table className="w-full min-w-[640px] text-left text-sm">
                   <thead className="text-xs uppercase text-slate-400">
                     <tr>
+                      <th className="pb-3 pr-4">Alert ID</th>
                       <th className="pb-3 pr-4">Severity</th>
                       <th className="pb-3 pr-4">Guest</th>
-                      <th className="pb-3 pr-4">Alert</th>
+                      <th className="pb-3 pr-4">Cause</th>
                       <th className="pb-3 pr-4">Time</th>
-                      <th className="pb-3 pr-4">Status</th>
-                      <th className="pb-3 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody className="text-slate-600">
@@ -766,69 +807,29 @@ export default function AdminDashboard() {
                         className="border-t border-slate-200/60"
                       >
                         <td className="py-3 pr-4 align-top">
+                          <p className="text-sm font-semibold text-slate-900">
+                            {alert.alertID}
+                          </p>
+                        </td>
+                        <td className="py-3 pr-4 align-top">
                           <span
                             className={`status-chip ${
-                              severityStyles[alert.severity]
+                              severityStyles[alert.alertLevel]
                             }`}
                           >
-                            {alert.severity}
+                            {alert.alertLevel}
                           </span>
                         </td>
                         <td className="py-3 pr-4 align-top">
                           <p className="text-sm font-semibold text-slate-900">
                             {alert.guestName}
                           </p>
-                          <p className="text-xs text-slate-500">
-                            {alert.wristbandNumber}
-                          </p>
                         </td>
                         <td className="py-3 pr-4 align-top text-xs text-slate-600">
-                          <p title={alert.reason}>{alert.message}</p>
-                          <p className="mt-1 cursor-help text-[11px] italic text-slate-400">
-                            {alert.reason}
-                          </p>
+                          <p title={alert.cause}>{alert.cause}</p>
                         </td>
                         <td className="py-3 pr-4 align-top text-xs text-slate-600">
-                          {alert.time}
-                        </td>
-                        <td className="py-3 pr-4 align-top">
-                          <span
-                            className={`status-chip ${
-                              alertStatusStyles[alert.status]
-                            }`}
-                          >
-                            {alert.status}
-                          </span>
-                        </td>
-                        <td className="py-3 text-right align-top">
-                          {alert.status !== 'Resolved' ? (
-                            <div className="flex justify-end gap-2">
-                              {alert.status === 'Open' && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleAlertStatus(alert.id, 'Acknowledged')
-                                  }
-                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
-                                >
-                                  Acknowledge
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleAlertStatus(alert.id, 'Resolved')
-                                }
-                                className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
-                              >
-                                Resolve
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-xs text-slate-400">
-                              Resolved
-                            </span>
-                          )}
+                          {formatAlertTime(alert)}
                         </td>
                       </tr>
                     ))}
