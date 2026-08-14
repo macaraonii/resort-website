@@ -74,6 +74,10 @@ const mainTabs = [
   { id: 'alerts', label: 'Alert Logs' }
 ];
 
+// Fallback total inventory used until /inventory/totalWristbands resolves
+// from Firebase (or if that path has never been set for this resort).
+const DEFAULT_WRISTBAND_INVENTORY = 150;
+
 const formatStayRange = (start, end) => {
   if (!start || !end) {
     return 'Stay pending';
@@ -93,9 +97,9 @@ const formatTime = (value) => {
 };
 
 // Firebase Realtime Database stores each collection as an object keyed by
-// its push id (or whatever key it was written under), not as an array.
-// This turns { key1: {...}, key2: {...} } into [{ id: key1, ... }, ...],
-// and returns an empty array when the path is empty/null.
+// its push id (or whatever key it was written under), not an array. This
+// turns { key1: {...}, key2: {...} } into [{ id: key1, ... }, ...], and
+// returns an empty array when the path is empty/null.
 const snapshotToArray = (snapshotValue) => {
   if (!snapshotValue) {
     return [];
@@ -107,10 +111,59 @@ const snapshotToArray = (snapshotValue) => {
   }));
 };
 
+// Turns the alert log into a downloadable CSV file so ops/compliance can
+// keep an offline record. Runs entirely client-side (Blob + object URL) so
+// it works the same whether the export covers the full history or just
+// whatever severity tab is currently filtered.
+const downloadAlertsAsCsv = (rows) => {
+  const headers = [
+    'Severity',
+    'Guest',
+    'Wristband',
+    'Alert',
+    'Reason',
+    'Time',
+    'Status'
+  ];
+
+  const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+
+  const csvBody = rows
+    .map((alert) =>
+      [
+        alert.severity,
+        alert.guestName,
+        alert.wristbandNumber,
+        alert.message,
+        alert.reason,
+        alert.time,
+        alert.status
+      ]
+        .map(escapeCell)
+        .join(',')
+    )
+    .join('\n');
+
+  const csvContent = `${headers.map(escapeCell).join(',')}\n${csvBody}`;
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `alert-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+};
+
 export default function AdminDashboard() {
   const token = localStorage.getItem('cw_admin_token');
   const [assignments, setAssignments] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [totalInventory, setTotalInventory] = useState(
+    DEFAULT_WRISTBAND_INVENTORY
+  );
   const [search, setSearch] = useState('');
   const [activeAlertTab, setActiveAlertTab] = useState('All');
   const [activeMainTab, setActiveMainTab] = useState('dashboard');
@@ -141,6 +194,20 @@ export default function AdminDashboard() {
     const unsubscribe = onValue(alertsRef, (snapshot) => {
       setAlerts(snapshotToArray(snapshot.val()));
       setLastSync(new Date().toISOString());
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Live listener: /inventory/totalWristbands (optional path - falls back
+  // to DEFAULT_WRISTBAND_INVENTORY if the resort hasn't configured it yet).
+  useEffect(() => {
+    const inventoryRef = ref(db, 'inventory/totalWristbands');
+    const unsubscribe = onValue(inventoryRef, (snapshot) => {
+      const value = snapshot.val();
+      if (typeof value === 'number' && value > 0) {
+        setTotalInventory(value);
+      }
     });
 
     return () => unsubscribe();
@@ -178,15 +245,17 @@ export default function AdminDashboard() {
     const acknowledged = alerts.filter(
       (alert) => alert.status === 'Acknowledged'
     ).length;
+    const available = Math.max(totalInventory - active, 0);
 
     return {
       active,
       returned,
       openAlerts,
       criticalAlerts,
-      acknowledged
+      acknowledged,
+      available
     };
-  }, [assignments, alerts]);
+  }, [assignments, alerts, totalInventory]);
 
   const alertCounts = useMemo(() => {
     return {
@@ -250,6 +319,11 @@ export default function AdminDashboard() {
       return;
     }
 
+    if (totals.available <= 0) {
+      setFormError('No wristbands available - process a return before assigning.');
+      return;
+    }
+
     const now = new Date();
     const newAssignment = {
       guestName,
@@ -283,8 +357,6 @@ export default function AdminDashboard() {
     try {
       await update(ref(db, `assignments/${id}`), { status: 'Returned' });
     } catch (error) {
-      // Live listener is the source of truth, so on failure the UI simply
-      // stays in sync with whatever is actually in the database.
       console.error('Failed to mark assignment as returned:', error);
     }
   };
@@ -295,6 +367,10 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error('Failed to update alert status:', error);
     }
+  };
+
+  const handleExportLogs = () => {
+    downloadAlertsAsCsv(filteredAlerts);
   };
 
   const handleLogout = () => {
@@ -317,9 +393,15 @@ export default function AdminDashboard() {
             <h1 className="font-display text-2xl text-slate-900">
               Wristband Monitoring Center
             </h1>
-            <div className="flex items-center gap-2 text-xs text-slate-500">
-              <span className="flex h-2 w-2 rounded-full bg-aqua-300 animate-pulse" />
-              Firebase feed connected - Last sync {formatTime(lastSync)}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+              <span className="flex items-center gap-2">
+                <span className="flex h-2 w-2 rounded-full bg-aqua-300 animate-pulse" />
+                Firebase feed connected - Last sync {formatTime(lastSync)}
+              </span>
+              <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
+                <span className="flex h-2 w-2 rounded-full bg-ocean-500" />
+                {totals.available} wristbands available
+              </span>
             </div>
           </div>
           <button type="button" onClick={handleLogout} className="btn-secondary">
@@ -356,6 +438,17 @@ export default function AdminDashboard() {
                     {totals.openAlerts}
                   </span>
                 )}
+                {tab.id === 'wristbands' && (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                      totals.available === 0
+                        ? 'bg-coral-100 text-coral-600'
+                        : 'bg-aqua-100 text-ocean-700'
+                    }`}
+                  >
+                    {totals.available} left
+                  </span>
+                )}
                 <span
                   className={`absolute inset-x-3 -bottom-px h-0.5 rounded-full transition ${
                     isActive ? 'bg-slate-900' : 'bg-transparent'
@@ -380,7 +473,7 @@ export default function AdminDashboard() {
                   {totals.active}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  {assignments.length} total assignments tracked
+                  {totals.available} available of {totalInventory}
                 </p>
               </div>
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-1">
@@ -448,48 +541,61 @@ export default function AdminDashboard() {
                     No open or acknowledged alerts. All clear.
                   </div>
                 ) : (
-                  openAlertsPreview.map((alert) => (
-                    <div
-                      key={alert.id}
-                      className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-slate-200/60 bg-white/80 p-4"
-                    >
-                      <div className="flex items-start gap-3">
-                        <span
-                          className={`status-chip ${
-                            severityStyles[alert.severity]
-                          }`}
-                        >
-                          {alert.severity}
-                        </span>
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">
-                            {alert.guestName}
-                            <span className="ml-2 text-xs font-normal text-slate-500">
-                              {alert.wristbandNumber}
-                            </span>
-                          </p>
-                          <p className="mt-1 text-xs text-slate-600">
-                            {alert.message}
-                          </p>
-                          <p className="mt-1 text-[11px] italic text-slate-400">
-                            {alert.reason}
-                          </p>
+                  openAlertsPreview.map((alert) => {
+                    const isCritical = alert.severity === 'Critical';
+                    return (
+                      <div
+                        key={alert.id}
+                        className={`flex flex-wrap items-start justify-between gap-4 rounded-2xl border p-4 ${
+                          isCritical
+                            ? 'border-coral-300 bg-[#fee2e2] shadow-sm'
+                            : 'border-slate-200/60 bg-white/80'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <span
+                            className={`status-chip ${
+                              severityStyles[alert.severity]
+                            }`}
+                          >
+                            {isCritical && (
+                              <span className="relative mr-1 inline-flex h-2 w-2">
+                                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
+                                <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                              </span>
+                            )}
+                            {alert.severity}
+                          </span>
+                          <div>
+                            <p className="text-sm font-semibold text-slate-900">
+                              {alert.guestName}
+                              <span className="ml-2 text-xs font-normal text-slate-500">
+                                {alert.wristbandNumber}
+                              </span>
+                            </p>
+                            <p className="mt-1 text-xs text-slate-600">
+                              {alert.message}
+                            </p>
+                            <p className="mt-1 text-[11px] italic text-slate-400">
+                              {alert.reason}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-2">
+                          <span
+                            className={`status-chip ${
+                              alertStatusStyles[alert.status]
+                            }`}
+                          >
+                            {alert.status}
+                          </span>
+                          <span className="text-xs text-slate-500">
+                            {alert.time}
+                          </span>
                         </div>
                       </div>
-                      <div className="flex flex-col items-end gap-2">
-                        <span
-                          className={`status-chip ${
-                            alertStatusStyles[alert.status]
-                          }`}
-                        >
-                          {alert.status}
-                        </span>
-                        <span className="text-xs text-slate-500">
-                          {alert.time}
-                        </span>
-                      </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </section>
@@ -511,8 +617,14 @@ export default function AdminDashboard() {
                     Add new guest details and set the wristband number manually.
                   </p>
                 </div>
-                <div className="status-chip bg-slate-900/5 text-slate-600">
-                  Admin entry
+                <div
+                  className={`status-chip ${
+                    totals.available === 0
+                      ? 'bg-coral-100 text-coral-600'
+                      : 'bg-slate-900/5 text-slate-600'
+                  }`}
+                >
+                  {totals.available} available
                 </div>
               </div>
 
@@ -609,7 +721,11 @@ export default function AdminDashboard() {
                     {formError}
                   </div>
                 )}
-                <button type="submit" className="btn-primary sm:col-span-2">
+                <button
+                  type="submit"
+                  disabled={totals.available <= 0}
+                  className="btn-primary sm:col-span-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
                   Assign Wristband
                 </button>
               </form>
@@ -706,8 +822,26 @@ export default function AdminDashboard() {
                   Streaming from Firebase and prioritized by severity.
                 </p>
               </div>
-              <div className="status-chip bg-slate-900/5 text-slate-600">
-                Live feed
+              <div className="flex items-center gap-2">
+                <div className="status-chip bg-slate-900/5 text-slate-600">
+                  Live feed
+                </div>
+                <button
+                  type="button"
+                  onClick={handleExportLogs}
+                  className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                    className="h-3.5 w-3.5"
+                  >
+                    <path d="M10 12.5a.75.75 0 0 0 .75-.75V4.56l1.72 1.72a.75.75 0 1 0 1.06-1.06l-3-3a.75.75 0 0 0-1.06 0l-3 3a.75.75 0 0 0 1.06 1.06l1.72-1.72v7.19c0 .414.336.75.75.75Z" />
+                    <path d="M4.25 10a.75.75 0 0 0-.75.75v4.5c0 .966.784 1.75 1.75 1.75h9.5a1.75 1.75 0 0 0 1.75-1.75v-4.5a.75.75 0 0 0-1.5 0v4.5a.25.25 0 0 1-.25.25h-9.5a.25.25 0 0 1-.25-.25v-4.5a.75.75 0 0 0-.75-.75Z" />
+                  </svg>
+                  Export Logs (CSV)
+                </button>
               </div>
             </div>
 
@@ -760,78 +894,98 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody className="text-slate-600">
-                    {filteredAlerts.map((alert) => (
-                      <tr
-                        key={alert.id}
-                        className="border-t border-slate-200/60"
-                      >
-                        <td className="py-3 pr-4 align-top">
-                          <span
-                            className={`status-chip ${
-                              severityStyles[alert.severity]
-                            }`}
-                          >
-                            {alert.severity}
-                          </span>
-                        </td>
-                        <td className="py-3 pr-4 align-top">
-                          <p className="text-sm font-semibold text-slate-900">
-                            {alert.guestName}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            {alert.wristbandNumber}
-                          </p>
-                        </td>
-                        <td className="py-3 pr-4 align-top text-xs text-slate-600">
-                          <p title={alert.reason}>{alert.message}</p>
-                          <p className="mt-1 cursor-help text-[11px] italic text-slate-400">
-                            {alert.reason}
-                          </p>
-                        </td>
-                        <td className="py-3 pr-4 align-top text-xs text-slate-600">
-                          {alert.time}
-                        </td>
-                        <td className="py-3 pr-4 align-top">
-                          <span
-                            className={`status-chip ${
-                              alertStatusStyles[alert.status]
-                            }`}
-                          >
-                            {alert.status}
-                          </span>
-                        </td>
-                        <td className="py-3 text-right align-top">
-                          {alert.status !== 'Resolved' ? (
-                            <div className="flex justify-end gap-2">
-                              {alert.status === 'Open' && (
+                    {filteredAlerts.map((alert) => {
+                      const isCritical = alert.severity === 'Critical';
+                      return (
+                        <tr
+                          key={alert.id}
+                          className={
+                            isCritical
+                              ? 'border-t border-l-4 border-coral-300 border-l-coral-500 bg-[#fee2e2]'
+                              : 'border-t border-slate-200/60'
+                          }
+                        >
+                          <td className="py-3 pr-4 align-top">
+                            <span
+                              className={`status-chip ${
+                                severityStyles[alert.severity]
+                              }`}
+                            >
+                              {isCritical && (
+                                <span className="relative mr-1 inline-flex h-2 w-2">
+                                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
+                                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                                </span>
+                              )}
+                              {alert.severity}
+                            </span>
+                          </td>
+                          <td className="py-3 pr-4 align-top">
+                            <p
+                              className={`text-sm font-semibold ${
+                                isCritical ? 'text-coral-700' : 'text-slate-900'
+                              }`}
+                            >
+                              {alert.guestName}
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              {alert.wristbandNumber}
+                            </p>
+                          </td>
+                          <td className="py-3 pr-4 align-top text-xs text-slate-600">
+                            <p title={alert.reason}>{alert.message}</p>
+                            <p className="mt-1 cursor-help text-[11px] italic text-slate-400">
+                              {alert.reason}
+                            </p>
+                          </td>
+                          <td className="py-3 pr-4 align-top text-xs text-slate-600">
+                            {alert.time}
+                          </td>
+                          <td className="py-3 pr-4 align-top">
+                            <span
+                              className={`status-chip ${
+                                alertStatusStyles[alert.status]
+                              }`}
+                            >
+                              {alert.status}
+                            </span>
+                          </td>
+                          <td className="py-3 text-right align-top">
+                            {alert.status !== 'Resolved' ? (
+                              <div className="flex justify-end gap-2">
+                                {alert.status === 'Open' && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleAlertStatus(
+                                        alert.id,
+                                        'Acknowledged'
+                                      )
+                                    }
+                                    className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                  >
+                                    Acknowledge
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleAlertStatus(alert.id, 'Acknowledged')
+                                    handleAlertStatus(alert.id, 'Resolved')
                                   }
-                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                  className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
                                 >
-                                  Acknowledge
+                                  Resolve
                                 </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleAlertStatus(alert.id, 'Resolved')
-                                }
-                                className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
-                              >
-                                Resolve
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-xs text-slate-400">
-                              Resolved
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400">
+                                Resolved
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
