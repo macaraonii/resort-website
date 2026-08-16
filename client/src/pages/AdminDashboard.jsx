@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { onValue, push, ref, set, update } from 'firebase/database';
 import { db } from '../config/firebase';
 
@@ -14,16 +13,22 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
 });
 
 // ---------------------------------------------------------------------------
-// Alert severity model
+// Firebase /alerts/{id} schema (exact keys, matched 1:1 below):
+//   guestName        string
+//   wristbandNumber  string
+//   severity         "Minor" | "Major" | "Critical"
+//   reason           string
+//   message          string
+//   status           "Open" | "Resolved"
+//   time             string
 //
-//   Minor    - Camera / wristband signals disagree, or a benign explanation
-//              (post-exercise heart rate) accounts for the reading.
-//   Major    - Camera and wristband both report abnormal signals together,
-//              OR the wristband alone reports a sustained abnormal reading
-//              while the camera view can't corroborate it.
-//   Critical - The wristband has confirmed an actual drowning event and
-//              deployed the CO2 airbag. Always treated as a real emergency,
-//              camera visibility is irrelevant.
+// Recency sorting note: the schema has no numeric timestamp, and `time` is
+// just a display string ("10:16 AM") with no date attached, so it can't be
+// parsed into a reliable chronological order. Instead we sort by `id`,
+// which is the Firebase push() key - push keys are generated to be
+// lexicographically sortable by creation time, so string-comparing ids
+// gives an exact newest-first order for free. If you ever switch to
+// custom (non-push) ids, add a real numeric `timestamp` field instead.
 // ---------------------------------------------------------------------------
 
 const severityStyles = {
@@ -41,23 +46,30 @@ const tabActiveStyles = {
   Critical: 'bg-coral-500 text-white border-coral-500'
 };
 
+// Badge shown when its tab is the active one (sits on top of the solid
+// tabActiveStyles background above).
 const tabBadgeStyles = {
   All: 'bg-white/20 text-white',
   Minor: 'bg-slate-900/10 text-slate-900',
   Major: 'bg-white/25 text-white',
-  Critical: 'bg-white/25 text-white'
+  Critical: 'bg-red-900 text-white'
 };
 
+// Badge shown when its tab is NOT active. Critical uses a solid dark-red
+// background with white text (rather than the light-bg/dark-text pattern
+// used for Minor/Major) so it reads as urgent even at rest, and so it
+// doesn't depend on a custom `coral` shade rendering correctly - bg-red-600
+// is a built-in Tailwind color, guaranteed to compile.
 const inactiveTabBadgeStyles = {
   All: 'bg-slate-100 text-slate-500',
   Minor: 'bg-sun-100 text-sun-600',
   Major: 'bg-orange-100 text-orange-600',
-  Critical: 'bg-coral-100 text-coral-600'
+  Critical: 'bg-red-600 text-white'
 };
 
+// Only two statuses exist in the Firebase schema - no "Acknowledged" state.
 const alertStatusStyles = {
   Open: 'bg-coral-300/20 text-coral-500',
-  Acknowledged: 'bg-sun-200/70 text-sun-500',
   Resolved: 'bg-aqua-200/70 text-ocean-700'
 };
 
@@ -74,9 +86,8 @@ const mainTabs = [
   { id: 'alerts', label: 'Alert Logs' }
 ];
 
-// Fallback total inventory used until /inventory/totalWristbands resolves
-// from Firebase (or if that path has never been set for this resort).
 const DEFAULT_WRISTBAND_INVENTORY = 150;
+const CRITICAL_ALARM_SRC = '/critical-alarm.mp3';
 
 const formatStayRange = (start, end) => {
   if (!start || !end) {
@@ -96,10 +107,12 @@ const formatTime = (value) => {
   return timeFormatter.format(new Date(value));
 };
 
+// Newest-first comparator using Firebase push-key ordering (see note above).
+const byNewestFirst = (a, b) => b.id.localeCompare(a.id);
+
 // Firebase Realtime Database stores each collection as an object keyed by
-// its push id (or whatever key it was written under), not an array. This
-// turns { key1: {...}, key2: {...} } into [{ id: key1, ... }, ...], and
-// returns an empty array when the path is empty/null.
+// its push id, not an array. This turns { key1: {...}, key2: {...} } into
+// [{ id: key1, ... }, ...], and returns [] when the path is empty/null.
 const snapshotToArray = (snapshotValue) => {
   if (!snapshotValue) {
     return [];
@@ -111,10 +124,6 @@ const snapshotToArray = (snapshotValue) => {
   }));
 };
 
-// Turns the alert log into a downloadable CSV file so ops/compliance can
-// keep an offline record. Runs entirely client-side (Blob + object URL) so
-// it works the same whether the export covers the full history or just
-// whatever severity tab is currently filtered.
 const downloadAlertsAsCsv = (rows) => {
   const headers = [
     'Severity',
@@ -158,7 +167,6 @@ const downloadAlertsAsCsv = (rows) => {
 };
 
 export default function AdminDashboard() {
-  const token = localStorage.getItem('cw_admin_token');
   const [assignments, setAssignments] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [totalInventory, setTotalInventory] = useState(
@@ -176,6 +184,64 @@ export default function AdminDashboard() {
   });
   const [formError, setFormError] = useState('');
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
+
+  // --- Audible critical-alarm state -----------------------------------
+  const [monitoringStarted, setMonitoringStarted] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const audioRef = useRef(null);
+  const monitoringStartedRef = useRef(false);
+  const isMutedRef = useRef(false);
+  // null = "haven't seen a snapshot yet" - used so the very first Firebase
+  // payload never gets treated as a batch of brand-new critical alerts.
+  const previousAlertIdsRef = useRef(null);
+
+  useEffect(() => {
+    monitoringStartedRef.current = monitoringStarted;
+  }, [monitoringStarted]);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
+  // Create the Audio element once on mount.
+  useEffect(() => {
+    audioRef.current = new Audio(CRITICAL_ALARM_SRC);
+    audioRef.current.preload = 'auto';
+  }, []);
+
+  const playCriticalAlarm = () => {
+    const audio = audioRef.current;
+    if (!audio || !monitoringStartedRef.current || isMutedRef.current) {
+      return;
+    }
+
+    audio.currentTime = 0;
+    audio.play().catch((error) => {
+      console.warn('Critical alarm playback was blocked:', error);
+    });
+  };
+
+  // Browsers require a user gesture before any audio can play. Clicking
+  // "Start Monitoring" plays-then-immediately-pauses the alarm element so
+  // the browser registers it as user-initiated; that unlocks unprompted
+  // audio.play() calls for the rest of the session.
+  const handleStartMonitoring = () => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio
+        .play()
+        .then(() => {
+          audio.pause();
+          audio.currentTime = 0;
+        })
+        .catch(() => {
+          // If the trial play is still blocked, monitoringStarted still
+          // flips - most browsers allow the *next* play() after a click
+          // even if this priming attempt was rejected.
+        });
+    }
+    setMonitoringStarted(true);
+  };
 
   // Live listener: /assignments
   useEffect(() => {
@@ -199,8 +265,35 @@ export default function AdminDashboard() {
     return () => unsubscribe();
   }, []);
 
-  // Live listener: /inventory/totalWristbands (optional path - falls back
-  // to DEFAULT_WRISTBAND_INVENTORY if the resort hasn't configured it yet).
+  // Alarm trigger: diff the previous alerts list against whatever just
+  // came in from Firebase. Anything whose id wasn't present last time,
+  // with severity "Critical" and status "Open", is a genuinely new
+  // critical alert and should sound the alarm.
+  useEffect(() => {
+    const previousIds = previousAlertIdsRef.current;
+
+    if (previousIds === null) {
+      // First payload after mount (or after a refresh) - this is just
+      // Firebase handing us the existing history, not new alerts.
+      previousAlertIdsRef.current = new Set(alerts.map((alert) => alert.id));
+      return;
+    }
+
+    const newlyArrivedCriticalAlerts = alerts.filter(
+      (alert) =>
+        !previousIds.has(alert.id) &&
+        alert.severity === 'Critical' &&
+        alert.status === 'Open'
+    );
+
+    if (newlyArrivedCriticalAlerts.length > 0) {
+      playCriticalAlarm();
+    }
+
+    previousAlertIdsRef.current = new Set(alerts.map((alert) => alert.id));
+  }, [alerts]);
+
+  // Live listener: /inventory/totalWristbands (optional path)
   useEffect(() => {
     const inventoryRef = ref(db, 'inventory/totalWristbands');
     const unsubscribe = onValue(inventoryRef, (snapshot) => {
@@ -235,15 +328,9 @@ export default function AdminDashboard() {
     const active = assignments.filter((item) => item.status === 'Active').length;
     const returned = assignments.filter((item) => item.status === 'Returned')
       .length;
-    const openAlerts = alerts.filter(
-      (alert) => alert.status !== 'Resolved'
-    ).length;
+    const openAlerts = alerts.filter((alert) => alert.status === 'Open').length;
     const criticalAlerts = alerts.filter(
-      (alert) =>
-        alert.status !== 'Resolved' && alert.severity === 'Critical'
-    ).length;
-    const acknowledged = alerts.filter(
-      (alert) => alert.status === 'Acknowledged'
+      (alert) => alert.status === 'Open' && alert.severity === 'Critical'
     ).length;
     const available = Math.max(totalInventory - active, 0);
 
@@ -252,7 +339,6 @@ export default function AdminDashboard() {
       returned,
       openAlerts,
       criticalAlerts,
-      acknowledged,
       available
     };
   }, [assignments, alerts, totalInventory]);
@@ -266,17 +352,30 @@ export default function AdminDashboard() {
     };
   }, [alerts]);
 
+  // Alert Logs table: a log history reads strictly newest-first, so
+  // severity plays no part in ordering here - only the severity *filter*
+  // (activeAlertTab) narrows which rows show up.
   const filteredAlerts = useMemo(() => {
-    if (activeAlertTab === 'All') {
-      return alerts;
-    }
-    return alerts.filter((alert) => alert.severity === activeAlertTab);
+    const bySeverity =
+      activeAlertTab === 'All'
+        ? alerts
+        : alerts.filter((alert) => alert.severity === activeAlertTab);
+
+    return [...bySeverity].sort(byNewestFirst);
   }, [alerts, activeAlertTab]);
 
+  // Dashboard preview: grouped by severity (Critical, then Major, then
+  // Minor), and within each group the newest alert sits on top.
   const openAlertsPreview = useMemo(() => {
     return alerts
-      .filter((alert) => alert.status !== 'Resolved')
-      .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+      .filter((alert) => alert.status === 'Open')
+      .sort((a, b) => {
+        const severityDiff = severityOrder[a.severity] - severityOrder[b.severity];
+        if (severityDiff !== 0) {
+          return severityDiff;
+        }
+        return byNewestFirst(a, b);
+      });
   }, [alerts]);
 
   const handleAssign = async (event) => {
@@ -361,26 +460,17 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleAlertStatus = async (id, status) => {
+  const handleResolveAlert = async (id) => {
     try {
-      await update(ref(db, `alerts/${id}`), { status });
+      await update(ref(db, `alerts/${id}`), { status: 'Resolved' });
     } catch (error) {
-      console.error('Failed to update alert status:', error);
+      console.error('Failed to resolve alert:', error);
     }
   };
 
   const handleExportLogs = () => {
     downloadAlertsAsCsv(filteredAlerts);
   };
-
-  const handleLogout = () => {
-    localStorage.removeItem('cw_admin_token');
-    window.location.href = '/login';
-  };
-
-  if (!token) {
-    return <Navigate to="/login" replace />;
-  }
 
   return (
     <div className="min-h-screen">
@@ -404,11 +494,41 @@ export default function AdminDashboard() {
               </span>
             </div>
           </div>
-          <button type="button" onClick={handleLogout} className="btn-secondary">
-            Logout
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsMuted((prev) => !prev)}
+              className="btn-secondary"
+              title={
+                monitoringStarted
+                  ? 'Toggle the audible critical alarm'
+                  : 'Start monitoring first to enable audio'
+              }
+            >
+              {isMuted ? 'Unmute Alerts' : 'Mute Alerts'}
+            </button>
+          </div>
         </div>
       </header>
+
+      {!monitoringStarted && (
+        <div className="border-b border-sun-200 bg-sun-50">
+          <div className="mx-auto flex flex-wrap items-center justify-between gap-3 px-6 py-3 text-sm text-slate-700 sm:px-10 lg:px-20">
+            <p>
+              <span className="font-semibold">Enable the critical alarm.</span>{' '}
+              Browsers block audio until you interact with the page - click
+              Start Monitoring so a Critical alert can sound automatically.
+            </p>
+            <button
+              type="button"
+              onClick={handleStartMonitoring}
+              className="btn-primary px-4 py-1.5 text-xs"
+            >
+              Start Monitoring
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Top-level tab navigation */}
       <nav className="sticky top-0 z-10 border-b border-white/60 bg-white/80 backdrop-blur">
@@ -489,13 +609,13 @@ export default function AdminDashboard() {
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-2">
                 <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-coral-300/40 blur-2xl" />
                 <p className="text-xs font-semibold text-slate-500">
-                  Acknowledged alerts
+                  Critical alerts
                 </p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
-                  {totals.acknowledged}
+                  {totals.criticalAlerts}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  Waiting for resolution updates
+                  Open and unresolved right now
                 </p>
               </div>
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-3">
@@ -522,8 +642,8 @@ export default function AdminDashboard() {
                     Live &amp; open emergencies
                   </h2>
                   <p className="mt-2 text-xs text-slate-500">
-                    Unresolved alerts only, sorted by severity. Full history lives
-                    in Alert Logs.
+                    Grouped by severity, newest first within each group. Full
+                    history lives in Alert Logs.
                   </p>
                 </div>
                 <button
@@ -538,7 +658,7 @@ export default function AdminDashboard() {
               <div className="mt-6 space-y-3">
                 {openAlertsPreview.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-                    No open or acknowledged alerts. All clear.
+                    No open alerts. All clear.
                   </div>
                 ) : (
                   openAlertsPreview.map((alert) => {
@@ -819,7 +939,7 @@ export default function AdminDashboard() {
                   Live wristband alerts
                 </h2>
                 <p className="mt-2 text-xs text-slate-500">
-                  Streaming from Firebase and prioritized by severity.
+                  Streaming from Firebase, sorted newest first.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -882,15 +1002,15 @@ export default function AdminDashboard() {
               </div>
             ) : (
               <div className="mt-6 overflow-x-auto">
-                <table className="w-full min-w-[640px] text-left text-sm">
+                <table className="w-full min-w-[640px] border-separate border-spacing-0 text-left text-sm">
                   <thead className="text-xs uppercase text-slate-400">
                     <tr>
-                      <th className="pb-3 pr-4">Severity</th>
+                      <th className="pb-3 pl-1 pr-4">Severity</th>
                       <th className="pb-3 pr-4">Guest</th>
                       <th className="pb-3 pr-4">Alert</th>
                       <th className="pb-3 pr-4">Time</th>
                       <th className="pb-3 pr-4">Status</th>
-                      <th className="pb-3 text-right">Action</th>
+                      <th className="pb-3 pr-4 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody className="text-slate-600">
@@ -899,13 +1019,13 @@ export default function AdminDashboard() {
                       return (
                         <tr
                           key={alert.id}
-                          className={
+                          className={`border-t border-l-4 ${
                             isCritical
-                              ? 'border-t border-l-4 border-coral-300 border-l-coral-500 bg-[#fee2e2]'
-                              : 'border-t border-slate-200/60'
-                          }
+                              ? 'border-coral-300 border-l-coral-500 bg-[#fee2e2]'
+                              : 'border-slate-200/60 border-l-transparent'
+                          }`}
                         >
-                          <td className="py-3 pr-4 align-top">
+                          <td className="py-3 pl-1 pr-4 align-top">
                             <span
                               className={`status-chip ${
                                 severityStyles[alert.severity]
@@ -950,33 +1070,15 @@ export default function AdminDashboard() {
                               {alert.status}
                             </span>
                           </td>
-                          <td className="py-3 text-right align-top">
-                            {alert.status !== 'Resolved' ? (
-                              <div className="flex justify-end gap-2">
-                                {alert.status === 'Open' && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleAlertStatus(
-                                        alert.id,
-                                        'Acknowledged'
-                                      )
-                                    }
-                                    className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
-                                  >
-                                    Acknowledge
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleAlertStatus(alert.id, 'Resolved')
-                                  }
-                                  className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
-                                >
-                                  Resolve
-                                </button>
-                              </div>
+                          <td className="py-3 pr-4 text-right align-top">
+                            {alert.status === 'Open' ? (
+                              <button
+                                type="button"
+                                onClick={() => handleResolveAlert(alert.id)}
+                                className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white transition hover:bg-slate-700"
+                              >
+                                Resolve
+                              </button>
                             ) : (
                               <span className="text-xs text-slate-400">
                                 Resolved
