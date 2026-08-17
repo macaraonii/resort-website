@@ -121,7 +121,6 @@ const isCameraAlert = (alert) =>
   String(alert?.cause ?? '')
     .toLowerCase()
     .includes('camera');
-
 const toTimestamp = (value) => {
   if (typeof value === 'number') {
     return value;
@@ -236,6 +235,20 @@ const snapshotToArray = (snapshotValue) => {
   return collectAlertRecords(snapshotValue);
 };
 
+// Assignments use a flat shape (no severity/cause fields to hunt for like
+// alerts do), so they get their own lightweight parser instead of going
+// through collectAlertRecords/normalizeAlertRecord.
+const parseAssignments = (snapshotValue) => {
+  if (!snapshotValue || typeof snapshotValue !== 'object') {
+    return [];
+  }
+
+  return Object.entries(snapshotValue).map(([key, value]) => ({
+    id: key,
+    ...value
+  }));
+};
+
 const downloadAlertsAsCsv = (rows) => {
   const headers = [
     'Alert ID',
@@ -297,6 +310,10 @@ export default function AdminDashboard() {
     wristbandNumber: ''
   });
   const [formError, setFormError] = useState('');
+  // Tracks whether the Firebase write is currently in flight, so the
+  // button can't be double-clicked and the UI can distinguish "idle" from
+  // "submitting" instead of assuming success the instant you click.
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
 
   // --- Audible critical-alarm state -----------------------------------
@@ -362,7 +379,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     const assignmentsRef = ref(db, 'assignments');
     const unsubscribe = onValue(assignmentsRef, (snapshot) => {
-      setAssignments(snapshotToArray(snapshot.val()));
+      setAssignments(parseAssignments(snapshot.val()));
       setLastSync(new Date().toISOString());
     });
 
@@ -457,10 +474,16 @@ export default function AdminDashboard() {
     return () => unsubscribe();
   }, []);
 
-  const activeAssignments = useMemo(
-    () => assignments.filter((item) => item.status === 'Active'),
-    [assignments]
-  );
+  const activeAssignments = useMemo(() => {
+    const toTime = (value) => {
+      const parsed = value ? new Date(value).getTime() : NaN;
+      return Number.isNaN(parsed) ? 0 : parsed;
+    };
+
+    return assignments
+      .filter((item) => item.status === 'Active')
+      .sort((a, b) => toTime(b.assignedAt) - toTime(a.assignedAt));
+  }, [assignments]);
 
   const filteredAssignments = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -592,11 +615,28 @@ export default function AdminDashboard() {
       lastSeen: now.toISOString()
     };
 
+    // Guard against double submits (e.g. double click) while a write is
+    // already in flight.
+    if (isSubmitting) {
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
       const assignmentsRef = ref(db, 'assignments');
       const newAssignmentRef = push(assignmentsRef);
-      await set(newAssignmentRef, newAssignment);
 
+      console.log(
+        '[handleAssign] writing to',
+        newAssignmentRef.toString(),
+        newAssignment
+      );
+      await set(newAssignmentRef, newAssignment);
+      console.log('[handleAssign] write confirmed by server');
+
+      // Only clear the form once the write above has actually resolved
+      // successfully - if set() throws, this line never runs and the
+      // catch block below takes over instead.
       setForm({
         guestName: '',
         age: '',
@@ -605,7 +645,25 @@ export default function AdminDashboard() {
         wristbandNumber: ''
       });
     } catch (error) {
-      setFormError('Could not save the assignment to Firebase. Try again.');
+      // This log is the important addition: without it, a
+      // PERMISSION_DENIED or network rejection from Firebase fails
+      // completely silently in the console while still showing a
+      // banner in the UI, which is exactly the symptom that was
+      // reported (no console errors, form clears anyway - previously
+      // it wouldn't have, but the lack of logging made it look like a
+      // React logic bug instead of a Firebase rejection).
+      console.error(
+        '[handleAssign] Firebase write failed:',
+        error?.code ?? '',
+        error?.message ?? error
+      );
+      setFormError(
+        error?.code === 'PERMISSION_DENIED'
+          ? 'Permission denied - check your Realtime Database security rules.'
+          : 'Could not save the assignment to Firebase. Try again.'
+      );
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -1006,10 +1064,10 @@ export default function AdminDashboard() {
                 )}
                 <button
                   type="submit"
-                  disabled={totals.available <= 0}
+                  disabled={totals.available <= 0 || isSubmitting}
                   className="btn-primary sm:col-span-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Assign Wristband
+                  {isSubmitting ? 'Assigning…' : 'Assign Wristband'}
                 </button>
               </form>
             </div>
