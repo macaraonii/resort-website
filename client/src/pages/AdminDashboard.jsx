@@ -36,7 +36,9 @@ const tabActiveStyles = {
   All: 'bg-slate-900 text-white border-slate-900',
   Minor: 'bg-sun-400 text-slate-900 border-sun-400',
   Major: 'bg-orange-400 text-white border-orange-400',
-  Critical: 'bg-coral-500 text-white border-coral-500'
+  Critical: 'bg-coral-500 text-white border-coral-500',
+  Camera: 'bg-ocean-500 text-white border-ocean-500',
+  Wristband: 'bg-aqua-200 text-ocean-800 border-aqua-200'
 };
 
 // Badge shown when its tab is the active one (sits on top of the solid
@@ -45,7 +47,9 @@ const tabBadgeStyles = {
   All: 'bg-white/20 text-white',
   Minor: 'bg-slate-900/10 text-slate-900',
   Major: 'bg-white/25 text-white',
-  Critical: 'bg-red-900 text-white'
+  Critical: 'bg-red-900 text-white',
+  Camera: 'bg-white/20 text-white',
+  Wristband: 'bg-ocean-900/10 text-ocean-800'
 };
 
 // Badge shown when its tab is NOT active. Critical uses a solid dark-red
@@ -57,7 +61,9 @@ const inactiveTabBadgeStyles = {
   All: 'bg-slate-100 text-slate-500',
   Minor: 'bg-sun-100 text-sun-600',
   Major: 'bg-orange-100 text-orange-600',
-  Critical: 'bg-red-600 text-white'
+  Critical: 'bg-red-600 text-white',
+  Camera: 'bg-ocean-100 text-ocean-700',
+  Wristband: 'bg-aqua-100 text-ocean-700'
 };
 
 // Only two statuses exist in the Firebase schema - no "Acknowledged" state.
@@ -111,6 +117,10 @@ const formatTime = (value) => {
   return timeFormatter.format(parsedTime);
 };
 
+const isCameraAlert = (alert) =>
+  String(alert?.cause ?? '')
+    .toLowerCase()
+    .includes('camera');
 const toTimestamp = (value) => {
   if (typeof value === 'number') {
     return value;
@@ -512,20 +522,25 @@ export default function AdminDashboard() {
       All: alerts.length,
       Minor: alerts.filter((alert) => alert.alertlevel === 'Minor').length,
       Major: alerts.filter((alert) => alert.alertlevel === 'Major').length,
-      Critical: alerts.filter((alert) => alert.alertlevel === 'Critical').length
+      Critical: alerts.filter((alert) => alert.alertlevel === 'Critical').length,
+      Camera: alerts.filter((alert) => isCameraAlert(alert)).length,
+      Wristband: alerts.filter((alert) => !isCameraAlert(alert)).length
     };
   }, [alerts]);
 
   // Alert Logs table: a log history reads strictly newest-first, so
-  // severity plays no part in ordering here - only the severity *filter*
-  // (activeAlertTab) narrows which rows show up.
+  // severity and alert-type filters only narrow which rows show up.
   const filteredAlerts = useMemo(() => {
-    const bySeverity =
+    const byFilter =
       activeAlertTab === 'All'
         ? alerts
-        : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
+        : activeAlertTab === 'Camera'
+          ? alerts.filter((alert) => isCameraAlert(alert))
+          : activeAlertTab === 'Wristband'
+            ? alerts.filter((alert) => !isCameraAlert(alert))
+            : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
 
-    return [...bySeverity].sort(byNewestFirst);
+    return [...byFilter].sort(byNewestFirst);
   }, [alerts, activeAlertTab]);
 
   // Dashboard preview: grouped by severity (Critical, then Major, then
@@ -1171,9 +1186,9 @@ export default function AdminDashboard() {
               </div>
             </div>
 
-            {/* Severity filter tabs */}
+            {/* Severity and alert-type filter tabs */}
             <div className="mt-5 flex flex-wrap gap-2">
-              {severityTabs.map((tab) => {
+              {[...severityTabs, 'Camera', 'Wristband'].map((tab) => {
                 const isActive = activeAlertTab === tab;
                 return (
                   <button
