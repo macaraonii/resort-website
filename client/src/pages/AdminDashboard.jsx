@@ -13,22 +13,15 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
 });
 
 // ---------------------------------------------------------------------------
-// Firebase /alerts/{id} schema (exact keys, matched 1:1 below):
-//   guestName        string
-//   wristbandNumber  string
-//   severity         "Minor" | "Major" | "Critical"
-//   reason           string
-//   message          string
-//   status           "Open" | "Resolved"
-//   time             string
+// Firebase /alerts/{id} schema (normalized at the dashboard boundary):
+//   alertID      number | string (optional - raw payload id, display only)
+//   alertlevel   "Minor" | "Major" | "Critical"
+//   cause        string
+//   readAt       string | number
+//   status       "Open" | "Resolved"
 //
-// Recency sorting note: the schema has no numeric timestamp, and `time` is
-// just a display string ("10:16 AM") with no date attached, so it can't be
-// parsed into a reliable chronological order. Instead we sort by `id`,
-// which is the Firebase push() key - push keys are generated to be
-// lexicographically sortable by creation time, so string-comparing ids
-// gives an exact newest-first order for free. If you ever switch to
-// custom (non-push) ids, add a real numeric `timestamp` field instead.
+// Legacy fields are mapped into the display shape so the dashboard stays
+// live against any source writing into the realtime alert table.
 // ---------------------------------------------------------------------------
 
 const severityStyles = {
@@ -104,28 +97,137 @@ const formatTime = (value) => {
     return '---';
   }
 
-  return timeFormatter.format(new Date(value));
+  const parsedValue =
+    typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  const parsedTime =
+    typeof parsedValue === 'number'
+      ? new Date(parsedValue)
+      : new Date(String(parsedValue));
+
+  if (Number.isNaN(parsedTime.getTime())) {
+    return String(value);
+  }
+
+  return timeFormatter.format(parsedTime);
 };
 
-// Newest-first comparator using Firebase push-key ordering (see note above).
-const byNewestFirst = (a, b) => b.id.localeCompare(a.id);
+const toTimestamp = (value) => {
+  if (typeof value === 'number') {
+    return value;
+  }
 
-// Firebase Realtime Database stores each collection as an object keyed by
-// its push id, not an array. This turns { key1: {...}, key2: {...} } into
-// [{ id: key1, ... }, ...], and returns [] when the path is empty/null.
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    return Number(value);
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+  }
+
+  if (value && typeof value.seconds === 'number') {
+    return value.seconds * 1000 + Math.floor((value.nanoseconds ?? 0) / 1e6);
+  }
+
+  return Number.NEGATIVE_INFINITY;
+};
+
+// Formats a raw alertID for display: "#135" for numbers/numeric strings,
+// falls back to whatever was provided (still prefixed) for non-numeric ids,
+// and returns null when there's nothing to show so callers can skip
+// rendering entirely rather than printing "#undefined".
+const formatAlertId = (alertID) => {
+  if (alertID === null || alertID === undefined || alertID === '') {
+    return null;
+  }
+
+  return `#${alertID}`;
+};
+
+const normalizeAlertRecord = (id, value = {}) => {
+  const source = value ?? {};
+  const alertlevel =
+    source.alertlevel ?? source.alertLevel ?? source.severity ?? 'Minor';
+  const cause = source.cause ?? source.message ?? source.reason ?? '';
+  const readAt = source.readAt ?? source.time ?? source.readAtMs ?? null;
+  const readAtMs = source.readAtMs ?? (readAt ? toTimestamp(readAt) : null);
+  const recordId = source.alertID ?? id;
+
+  return {
+    storagePath: String(id),
+    id: String(recordId),
+    ...source,
+    alertlevel,
+    severity: alertlevel,
+    cause,
+    message: cause,
+    reason: source.reason ?? cause,
+    readAt,
+    readAtMs,
+    time: formatTime(readAt ?? readAtMs),
+    status: source.status ?? 'Open'
+  };
+};
+
+// Newest-first comparator using the realtime readAt value.
+const byNewestFirst = (a, b) => {
+  const timeDiff = toTimestamp(b.readAt) - toTimestamp(a.readAt);
+  if (timeDiff !== 0) {
+    return timeDiff;
+  }
+
+  return b.id.localeCompare(a.id);
+};
+
+// Firebase Realtime Database can store alerts either directly under /alerts
+// or nested one level deeper in grouped tables. This flattens both shapes
+// into a single array and returns [] when the path is empty/null.
+const isAlertLikeRecord = (value) =>
+  Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      ('alertlevel' in value ||
+        'alertLevel' in value ||
+        'severity' in value ||
+        'cause' in value ||
+        'message' in value ||
+        'reason' in value ||
+        'readAt' in value ||
+        'time' in value)
+  );
+
+const collectAlertRecords = (node, path = []) => {
+  if (!node || typeof node !== 'object') {
+    return [];
+  }
+
+  return Object.entries(node).flatMap(([key, value]) => {
+    const nextPath = [...path, key];
+
+    if (isAlertLikeRecord(value)) {
+      return [normalizeAlertRecord(nextPath.join('/'), value)];
+    }
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return collectAlertRecords(value, nextPath);
+    }
+
+    return [];
+  });
+};
+
 const snapshotToArray = (snapshotValue) => {
   if (!snapshotValue) {
     return [];
   }
 
-  return Object.entries(snapshotValue).map(([id, value]) => ({
-    id,
-    ...value
-  }));
+  return collectAlertRecords(snapshotValue);
 };
 
 const downloadAlertsAsCsv = (rows) => {
   const headers = [
+    'Alert ID',
     'Severity',
     'Guest',
     'Wristband',
@@ -140,12 +242,13 @@ const downloadAlertsAsCsv = (rows) => {
   const csvBody = rows
     .map((alert) =>
       [
-        alert.severity,
+        alert.alertID ?? '',
+        alert.alertlevel,
         alert.guestName,
         alert.wristbandNumber,
-        alert.message,
+        alert.cause,
         alert.reason,
-        alert.time,
+        formatTime(alert.readAt),
         alert.status
       ]
         .map(escapeCell)
@@ -191,6 +294,7 @@ export default function AdminDashboard() {
   const audioRef = useRef(null);
   const monitoringStartedRef = useRef(false);
   const isMutedRef = useRef(false);
+  const backfilledAlertPathsRef = useRef(new Set());
   // null = "haven't seen a snapshot yet" - used so the very first Firebase
   // payload never gets treated as a batch of brand-new critical alerts.
   const previousAlertIdsRef = useRef(null);
@@ -258,8 +362,44 @@ export default function AdminDashboard() {
   useEffect(() => {
     const alertsRef = ref(db, 'alerts');
     const unsubscribe = onValue(alertsRef, (snapshot) => {
-      setAlerts(snapshotToArray(snapshot.val()));
-      setLastSync(new Date().toISOString());
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+      const nextAlerts = snapshotToArray(snapshot.val()).map((alert) => {
+        const hasStoredTime = alert.readAt !== null && alert.readAt !== undefined;
+
+        if (hasStoredTime) {
+          return alert;
+        }
+
+        return {
+          ...alert,
+          readAt: nowIso,
+          readAtMs: nowMs,
+          time: formatTime(nowIso)
+        };
+      });
+
+      const missingTimestampAlerts = nextAlerts.filter(
+        (alert) =>
+          (alert.readAtMs === nowMs || alert.readAt === nowIso) &&
+          !backfilledAlertPathsRef.current.has(alert.storagePath)
+      );
+
+      if (missingTimestampAlerts.length > 0) {
+        missingTimestampAlerts.forEach((alert) => {
+          backfilledAlertPathsRef.current.add(alert.storagePath);
+          void update(ref(db, `alerts/${alert.storagePath}`), {
+            readAt: nowIso,
+            readAtMs: nowMs
+          }).catch((error) => {
+            console.error('Failed to backfill alert timestamp:', error);
+            backfilledAlertPathsRef.current.delete(alert.storagePath);
+          });
+        });
+      }
+
+      setAlerts(nextAlerts);
+      setLastSync(nowIso);
     });
 
     return () => unsubscribe();
@@ -282,7 +422,7 @@ export default function AdminDashboard() {
     const newlyArrivedCriticalAlerts = alerts.filter(
       (alert) =>
         !previousIds.has(alert.id) &&
-        alert.severity === 'Critical' &&
+        alert.alertlevel === 'Critical' &&
         alert.status === 'Open'
     );
 
@@ -330,7 +470,7 @@ export default function AdminDashboard() {
       .length;
     const openAlerts = alerts.filter((alert) => alert.status === 'Open').length;
     const criticalAlerts = alerts.filter(
-      (alert) => alert.status === 'Open' && alert.severity === 'Critical'
+      (alert) => alert.status === 'Open' && alert.alertlevel === 'Critical'
     ).length;
     const available = Math.max(totalInventory - active, 0);
 
@@ -346,9 +486,9 @@ export default function AdminDashboard() {
   const alertCounts = useMemo(() => {
     return {
       All: alerts.length,
-      Minor: alerts.filter((alert) => alert.severity === 'Minor').length,
-      Major: alerts.filter((alert) => alert.severity === 'Major').length,
-      Critical: alerts.filter((alert) => alert.severity === 'Critical').length
+      Minor: alerts.filter((alert) => alert.alertlevel === 'Minor').length,
+      Major: alerts.filter((alert) => alert.alertlevel === 'Major').length,
+      Critical: alerts.filter((alert) => alert.alertlevel === 'Critical').length
     };
   }, [alerts]);
 
@@ -359,7 +499,7 @@ export default function AdminDashboard() {
     const bySeverity =
       activeAlertTab === 'All'
         ? alerts
-        : alerts.filter((alert) => alert.severity === activeAlertTab);
+        : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
 
     return [...bySeverity].sort(byNewestFirst);
   }, [alerts, activeAlertTab]);
@@ -370,7 +510,8 @@ export default function AdminDashboard() {
     return alerts
       .filter((alert) => alert.status === 'Open')
       .sort((a, b) => {
-        const severityDiff = severityOrder[a.severity] - severityOrder[b.severity];
+        const severityDiff =
+          severityOrder[a.alertlevel] - severityOrder[b.alertlevel];
         if (severityDiff !== 0) {
           return severityDiff;
         }
@@ -662,7 +803,8 @@ export default function AdminDashboard() {
                   </div>
                 ) : (
                   openAlertsPreview.map((alert) => {
-                    const isCritical = alert.severity === 'Critical';
+                    const isCritical = alert.alertlevel === 'Critical';
+                    const alertIdLabel = formatAlertId(alert.alertID);
                     return (
                       <div
                         key={alert.id}
@@ -675,7 +817,7 @@ export default function AdminDashboard() {
                         <div className="flex items-start gap-3">
                           <span
                             className={`status-chip ${
-                              severityStyles[alert.severity]
+                              severityStyles[alert.alertlevel]
                             }`}
                           >
                             {isCritical && (
@@ -684,7 +826,7 @@ export default function AdminDashboard() {
                                 <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
                               </span>
                             )}
-                            {alert.severity}
+                            {alert.alertlevel}
                           </span>
                           <div>
                             <p className="text-sm font-semibold text-slate-900">
@@ -692,9 +834,14 @@ export default function AdminDashboard() {
                               <span className="ml-2 text-xs font-normal text-slate-500">
                                 {alert.wristbandNumber}
                               </span>
+                              {alertIdLabel && (
+                                <span className="ml-2 text-[10px] font-normal text-slate-400">
+                                  {alertIdLabel}
+                                </span>
+                              )}
                             </p>
                             <p className="mt-1 text-xs text-slate-600">
-                              {alert.message}
+                              {alert.cause}
                             </p>
                             <p className="mt-1 text-[11px] italic text-slate-400">
                               {alert.reason}
@@ -710,7 +857,7 @@ export default function AdminDashboard() {
                             {alert.status}
                           </span>
                           <span className="text-xs text-slate-500">
-                            {alert.time}
+                            {formatTime(alert.readAt)}
                           </span>
                         </div>
                       </div>
@@ -1015,7 +1162,8 @@ export default function AdminDashboard() {
                   </thead>
                   <tbody className="text-slate-600">
                     {filteredAlerts.map((alert) => {
-                      const isCritical = alert.severity === 'Critical';
+                      const isCritical = alert.alertlevel === 'Critical';
+                      const alertIdLabel = formatAlertId(alert.alertID);
                       return (
                         <tr
                           key={alert.id}
@@ -1028,7 +1176,7 @@ export default function AdminDashboard() {
                           <td className="py-3 pl-1 pr-4 align-top">
                             <span
                               className={`status-chip ${
-                                severityStyles[alert.severity]
+                                severityStyles[alert.alertlevel]
                               }`}
                             >
                               {isCritical && (
@@ -1037,7 +1185,7 @@ export default function AdminDashboard() {
                                   <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
                                 </span>
                               )}
-                              {alert.severity}
+                              {alert.alertlevel}
                             </span>
                           </td>
                           <td className="py-3 pr-4 align-top">
@@ -1051,15 +1199,20 @@ export default function AdminDashboard() {
                             <p className="text-xs text-slate-500">
                               {alert.wristbandNumber}
                             </p>
+                            {alertIdLabel && (
+                              <p className="mt-0.5 text-[10px] font-medium text-slate-400">
+                                {alertIdLabel}
+                              </p>
+                            )}
                           </td>
                           <td className="py-3 pr-4 align-top text-xs text-slate-600">
-                            <p title={alert.reason}>{alert.message}</p>
+                            <p title={alert.reason}>{alert.cause}</p>
                             <p className="mt-1 cursor-help text-[11px] italic text-slate-400">
                               {alert.reason}
                             </p>
                           </td>
                           <td className="py-3 pr-4 align-top text-xs text-slate-600">
-                            {alert.time}
+                            {formatTime(alert.readAt)}
                           </td>
                           <td className="py-3 pr-4 align-top">
                             <span
