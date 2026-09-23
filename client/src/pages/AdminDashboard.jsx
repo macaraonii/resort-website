@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { onValue, push, ref, set, update } from 'firebase/database';
-import { db } from '../config/firebase';
+import { db, firebaseAuthReady } from '../config/firebase';
 
 const stayFormatter = new Intl.DateTimeFormat('en-US', {
   month: 'short',
@@ -315,6 +315,8 @@ export default function AdminDashboard() {
   // "submitting" instead of assuming success the instant you click.
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
+  const [firebaseStatus, setFirebaseStatus] = useState('connecting');
+  const [firebaseError, setFirebaseError] = useState('');
 
   // --- Audible critical-alarm state -----------------------------------
   const [monitoringStarted, setMonitoringStarted] = useState(false);
@@ -339,6 +341,33 @@ export default function AdminDashboard() {
   useEffect(() => {
     audioRef.current = new Audio(CRITICAL_ALARM_SRC);
     audioRef.current.preload = 'auto';
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    firebaseAuthReady
+      .then(() => {
+        if (active) {
+          setFirebaseStatus('ready');
+        }
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        setFirebaseStatus('error');
+        setFirebaseError(
+          error?.code === 'auth/operation-not-allowed'
+            ? 'Firebase anonymous auth is disabled. Enable Anonymous sign-in in Firebase Authentication.'
+            : 'Firebase authentication failed. Check the Firebase config and database access rules.'
+        );
+      });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   const playCriticalAlarm = () => {
@@ -377,6 +406,10 @@ export default function AdminDashboard() {
 
   // Live listener: /assignments
   useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
     const assignmentsRef = ref(db, 'assignments');
     const unsubscribe = onValue(assignmentsRef, (snapshot) => {
       setAssignments(parseAssignments(snapshot.val()));
@@ -384,10 +417,14 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [firebaseStatus]);
 
   // Live listener: /alerts
   useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
     const alertsRef = ref(db, 'alerts');
     const unsubscribe = onValue(alertsRef, (snapshot) => {
       const nowIso = new Date().toISOString();
@@ -431,7 +468,7 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [firebaseStatus]);
 
   // Alarm trigger: diff the previous alerts list against whatever just
   // came in from Firebase. Anything whose id wasn't present last time,
@@ -463,6 +500,10 @@ export default function AdminDashboard() {
 
   // Live listener: /inventory/totalWristbands (optional path)
   useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
     const inventoryRef = ref(db, 'inventory/totalWristbands');
     const unsubscribe = onValue(inventoryRef, (snapshot) => {
       const value = snapshot.val();
@@ -472,7 +513,7 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [firebaseStatus]);
 
   const activeAssignments = useMemo(() => {
     const toTime = (value) => {
@@ -701,13 +742,22 @@ export default function AdminDashboard() {
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
               <span className="flex items-center gap-2">
                 <span className="flex h-2 w-2 rounded-full bg-aqua-300 animate-pulse" />
-                Firebase feed connected - Last sync {formatTime(lastSync)}
+                {firebaseStatus === 'ready'
+                  ? `Firebase feed connected - Last sync ${formatTime(lastSync)}`
+                  : firebaseStatus === 'error'
+                    ? 'Firebase feed unavailable'
+                    : 'Connecting to Firebase...'}
               </span>
               <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
                 <span className="flex h-2 w-2 rounded-full bg-ocean-500" />
                 {totals.available} wristbands available
               </span>
             </div>
+            {firebaseError && (
+              <p className="mt-2 max-w-2xl rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {firebaseError}
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
