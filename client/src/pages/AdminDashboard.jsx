@@ -81,7 +81,7 @@ const severityTabs = ['All', 'Minor', 'Major', 'Critical'];
 
 const mainTabs = [
   { id: 'dashboard', label: 'Dashboard' },
-  { id: 'wristbands', label: 'Wristband Management' },
+  { id: 'wristbands', label: 'Armband Management' },
   { id: 'alerts', label: 'Alert Logs' }
 ];
 
@@ -254,7 +254,7 @@ const downloadAlertsAsCsv = (rows) => {
     'Alert ID',
     'Severity',
     'Guest',
-    'Wristband',
+    'Armband',
     'Alert',
     'Reason',
     'Time',
@@ -737,7 +737,7 @@ export default function AdminDashboard() {
               Caribbean Waves Safety Operations
             </p>
             <h1 className="font-display text-2xl text-slate-900">
-              Wristband Monitoring Center
+              AquaGuard Monitoring Center
             </h1>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
               <span className="flex items-center gap-2">
@@ -750,7 +750,7 @@ export default function AdminDashboard() {
               </span>
               <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
                 <span className="flex h-2 w-2 rounded-full bg-ocean-500" />
-                {totals.available} wristbands available
+                {totals.available} armbands available
               </span>
             </div>
             {firebaseError && (
@@ -852,7 +852,7 @@ export default function AdminDashboard() {
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in">
                 <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-aqua-200/70 blur-2xl" />
                 <p className="text-xs font-semibold text-slate-500">
-                  Active wristbands
+                  Active armbands
                 </p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
                   {totals.active}
@@ -886,7 +886,7 @@ export default function AdminDashboard() {
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-3">
                 <div className="absolute -right-10 -top-8 h-24 w-24 rounded-full bg-ocean-100/70 blur-2xl" />
                 <p className="text-xs font-semibold text-slate-500">
-                  Wristbands returned
+                  Armbands returned
                 </p>
                 <p className="mt-4 font-display text-3xl text-slate-900">
                   {totals.returned}
@@ -999,7 +999,7 @@ export default function AdminDashboard() {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold text-slate-500">
-                    Assign wristband
+                    Assign armband
                   </p>
                   <h2 className="mt-2 font-display text-2xl text-slate-900">
                     Manual guest assignment
@@ -1126,7 +1126,7 @@ export default function AdminDashboard() {
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold text-slate-500">
-                    Active wristbands
+                    Active armbands
                   </p>
                   <h2 className="mt-2 font-display text-2xl text-slate-900">
                     Guests currently monitored
@@ -1138,7 +1138,7 @@ export default function AdminDashboard() {
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                     className="input-field"
-                    placeholder="Search name or wristband"
+                    placeholder="Search name or armband"
                   />
                 </div>
               </div>
@@ -1146,7 +1146,7 @@ export default function AdminDashboard() {
               <div className="mt-6 space-y-3">
                 {filteredAssignments.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-                    No active wristbands match your search.
+                    No active armbands match your search.
                   </div>
                 ) : (
                   filteredAssignments.map((assignment) => (
