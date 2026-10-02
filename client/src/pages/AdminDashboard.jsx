@@ -36,7 +36,9 @@ const tabActiveStyles = {
   All: 'bg-slate-900 text-white border-slate-900',
   Minor: 'bg-sun-400 text-slate-900 border-sun-400',
   Major: 'bg-orange-400 text-white border-orange-400',
-  Critical: 'bg-coral-500 text-white border-coral-500'
+  Critical: 'bg-coral-500 text-white border-coral-500',
+  Camera: 'bg-ocean-500 text-white border-ocean-500',
+  Wristband: 'bg-aqua-200 text-ocean-800 border-aqua-200'
 };
 
 // Badge shown when its tab is the active one (sits on top of the solid
@@ -45,7 +47,9 @@ const tabBadgeStyles = {
   All: 'bg-white/20 text-white',
   Minor: 'bg-slate-900/10 text-slate-900',
   Major: 'bg-white/25 text-white',
-  Critical: 'bg-red-900 text-white'
+  Critical: 'bg-red-900 text-white',
+  Camera: 'bg-white/20 text-white',
+  Wristband: 'bg-ocean-900/10 text-ocean-800'
 };
 
 // Badge shown when its tab is NOT active. Critical uses a solid dark-red
@@ -57,7 +61,9 @@ const inactiveTabBadgeStyles = {
   All: 'bg-slate-100 text-slate-500',
   Minor: 'bg-sun-100 text-sun-600',
   Major: 'bg-orange-100 text-orange-600',
-  Critical: 'bg-red-600 text-white'
+  Critical: 'bg-red-600 text-white',
+  Camera: 'bg-ocean-100 text-ocean-700',
+  Wristband: 'bg-aqua-100 text-ocean-700'
 };
 
 // Only two statuses exist in the Firebase schema - no "Acknowledged" state.
@@ -73,6 +79,8 @@ const assignmentStatusStyles = {
 
 const severityTabs = ['All', 'Minor', 'Major', 'Critical'];
 
+// NOTE: tab `id` values are internal routing keys, not displayed text - they
+// stay as-is. Only the `label` strings are user-facing.
 const mainTabs = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'wristbands', label: 'Armband Management' },
@@ -111,6 +119,10 @@ const formatTime = (value) => {
   return timeFormatter.format(parsedTime);
 };
 
+const isCameraAlert = (alert) =>
+  String(alert?.cause ?? '')
+    .toLowerCase()
+    .includes('camera');
 const toTimestamp = (value) => {
   if (typeof value === 'number') {
     return value;
@@ -305,6 +317,8 @@ export default function AdminDashboard() {
   // "submitting" instead of assuming success the instant you click.
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
+  const [firebaseStatus, setFirebaseStatus] = useState('connecting');
+  const [firebaseError, setFirebaseError] = useState('');
 
   // --- Audible critical-alarm state -----------------------------------
   const [monitoringStarted, setMonitoringStarted] = useState(false);
@@ -330,6 +344,10 @@ export default function AdminDashboard() {
     audioRef.current = new Audio(CRITICAL_ALARM_SRC);
     audioRef.current.preload = 'auto';
   }, []);
+
+  useEffect(() => {
+  setFirebaseStatus('ready');
+}, []);
 
   const playCriticalAlarm = () => {
     const audio = audioRef.current;
@@ -367,6 +385,10 @@ export default function AdminDashboard() {
 
   // Live listener: /assignments
   useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
     const assignmentsRef = ref(db, 'assignments');
     const unsubscribe = onValue(assignmentsRef, (snapshot) => {
       setAssignments(parseAssignments(snapshot.val()));
@@ -374,10 +396,14 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [firebaseStatus]);
 
   // Live listener: /alerts
   useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
     const alertsRef = ref(db, 'alerts');
     const unsubscribe = onValue(alertsRef, (snapshot) => {
       const nowIso = new Date().toISOString();
@@ -421,7 +447,7 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [firebaseStatus]);
 
   // Alarm trigger: diff the previous alerts list against whatever just
   // came in from Firebase. Anything whose id wasn't present last time,
@@ -453,6 +479,10 @@ export default function AdminDashboard() {
 
   // Live listener: /inventory/totalWristbands (optional path)
   useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
     const inventoryRef = ref(db, 'inventory/totalWristbands');
     const unsubscribe = onValue(inventoryRef, (snapshot) => {
       const value = snapshot.val();
@@ -462,7 +492,7 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [firebaseStatus]);
 
   const activeAssignments = useMemo(() => {
     const toTime = (value) => {
@@ -512,20 +542,25 @@ export default function AdminDashboard() {
       All: alerts.length,
       Minor: alerts.filter((alert) => alert.alertlevel === 'Minor').length,
       Major: alerts.filter((alert) => alert.alertlevel === 'Major').length,
-      Critical: alerts.filter((alert) => alert.alertlevel === 'Critical').length
+      Critical: alerts.filter((alert) => alert.alertlevel === 'Critical').length,
+      Camera: alerts.filter((alert) => isCameraAlert(alert)).length,
+      Wristband: alerts.filter((alert) => !isCameraAlert(alert)).length
     };
   }, [alerts]);
 
   // Alert Logs table: a log history reads strictly newest-first, so
-  // severity plays no part in ordering here - only the severity *filter*
-  // (activeAlertTab) narrows which rows show up.
+  // severity and alert-type filters only narrow which rows show up.
   const filteredAlerts = useMemo(() => {
-    const bySeverity =
+    const byFilter =
       activeAlertTab === 'All'
         ? alerts
-        : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
+        : activeAlertTab === 'Camera'
+          ? alerts.filter((alert) => isCameraAlert(alert))
+          : activeAlertTab === 'Wristband'
+            ? alerts.filter((alert) => !isCameraAlert(alert))
+            : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
 
-    return [...bySeverity].sort(byNewestFirst);
+    return [...byFilter].sort(byNewestFirst);
   }, [alerts, activeAlertTab]);
 
   // Dashboard preview: grouped by severity (Critical, then Major, then
@@ -543,6 +578,13 @@ export default function AdminDashboard() {
       });
   }, [alerts]);
 
+  // Jumps from a Dashboard preview alert straight to the Alert Logs tab,
+  // pre-filtered to that alert's severity.
+  const handleViewAlertInLogs = (alertlevel) => {
+    setActiveAlertTab(alertlevel);
+    setActiveMainTab('alerts');
+  };
+
   const handleAssign = async (event) => {
     event.preventDefault();
     setFormError('');
@@ -558,7 +600,7 @@ export default function AdminDashboard() {
       !form.stayEnd ||
       !wristbandNumber
     ) {
-      setFormError('Complete all fields before assigning a wristband.');
+      setFormError('Complete all fields before assigning an armband.');
       return;
     }
 
@@ -579,12 +621,12 @@ export default function AdminDashboard() {
           item.status === 'Active'
       )
     ) {
-      setFormError('That wristband is already assigned to an active guest.');
+      setFormError('That armband is already assigned to an active guest.');
       return;
     }
 
     if (totals.available <= 0) {
-      setFormError('No wristbands available - process a return before assigning.');
+      setFormError('No armbands available - process a return before assigning.');
       return;
     }
 
@@ -686,13 +728,22 @@ export default function AdminDashboard() {
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
               <span className="flex items-center gap-2">
                 <span className="flex h-2 w-2 rounded-full bg-aqua-300 animate-pulse" />
-                Firebase feed connected - Last sync {formatTime(lastSync)}
+                {firebaseStatus === 'ready'
+                  ? `Firebase feed connected - Last sync ${formatTime(lastSync)}`
+                  : firebaseStatus === 'error'
+                    ? 'Firebase feed unavailable'
+                    : 'Connecting to Firebase...'}
               </span>
               <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
                 <span className="flex h-2 w-2 rounded-full bg-ocean-500" />
                 {totals.available} armbands available
               </span>
             </div>
+            {firebaseError && (
+              <p className="mt-2 max-w-2xl rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {firebaseError}
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -908,13 +959,16 @@ export default function AdminDashboard() {
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-2">
-                          <span
-                            className={`status-chip ${
+                          <button
+                            type="button"
+                            onClick={() => handleViewAlertInLogs(alert.alertlevel)}
+                            className={`status-chip cursor-pointer transition hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-slate-400 ${
                               alertStatusStyles[alert.status]
                             }`}
+                            title={`View all ${alert.alertlevel} alerts in Alert Logs`}
                           >
                             {alert.status}
-                          </span>
+                          </button>
                           <span className="text-xs text-slate-500">
                             {formatTime(alert.readAt)}
                           </span>
@@ -940,7 +994,7 @@ export default function AdminDashboard() {
                     Manual guest assignment
                   </h2>
                   <p className="mt-2 text-xs text-slate-500">
-                    Add new guest details and set the wristband number manually.
+                    Add new guest details and set the armband number manually.
                   </p>
                 </div>
                 <div
@@ -995,7 +1049,7 @@ export default function AdminDashboard() {
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-500">
-                    Wristband number
+                    Armband number
                   </label>
                   <input
                     type="text"
@@ -1052,7 +1106,7 @@ export default function AdminDashboard() {
                   disabled={totals.available <= 0 || isSubmitting}
                   className="btn-primary sm:col-span-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {isSubmitting ? 'Assigning…' : 'Assign Wristband'}
+                  {isSubmitting ? 'Assigning…' : 'Assign Armband'}
                 </button>
               </form>
             </div>
@@ -1171,9 +1225,9 @@ export default function AdminDashboard() {
               </div>
             </div>
 
-            {/* Severity filter tabs */}
+            {/* Severity and alert-type filter tabs */}
             <div className="mt-5 flex flex-wrap gap-2">
-              {severityTabs.map((tab) => {
+              {[...severityTabs, 'Camera', 'Wristband'].map((tab) => {
                 const isActive = activeAlertTab === tab;
                 return (
                   <button
