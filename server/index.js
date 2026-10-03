@@ -5,6 +5,7 @@ import { initDb } from './src/db.js';
 import reservationsRouter from './src/routes/reservations.js';
 import accommodationsRouter from './src/routes/accommodations.js';
 import adminRouter from './src/routes/admin.js';
+import devicesRouter from './src/routes/devices.js';
 
 dotenv.config();
 
@@ -19,6 +20,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/reservations', reservationsRouter);
 app.use('/api/accommodations', accommodationsRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/devices', devicesRouter);
 
 const port = process.env.PORT || 4000;
 
