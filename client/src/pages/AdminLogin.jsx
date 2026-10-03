@@ -24,10 +24,10 @@ export default function AdminLogin() {
         <div className="self-center space-y-6">
           <span className="tag">Safety Operations</span>
           <h1 className="font-display text-4xl text-slate-900 sm:text-5xl">
-            Wristband Monitoring Access
+            Armband Monitoring Access
           </h1>
           <p className="text-sm text-slate-600">
-            Log in to manage wristband assignments, track guest safety, and
+            Log in to manage armband assignments, track guest safety, and
             respond to live ESP32 alerts routed through Firebase.
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
@@ -36,7 +36,7 @@ export default function AdminLogin() {
                 Live signal feed
               </p>
               <p className="mt-2 text-sm text-slate-700">
-                Monitor every alert broadcast from the wristbands in real time.
+                Monitor every alert broadcast from the armbands in real time.
               </p>
             </div>
             <div className="glass-panel p-4">
@@ -44,7 +44,7 @@ export default function AdminLogin() {
                 Manual assignments
               </p>
               <p className="mt-2 text-sm text-slate-700">
-                Assign wristband numbers to guests and manage stays quickly.
+                Assign armband numbers to guests and manage stays quickly.
               </p>
             </div>
           </div>
