@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { onValue, ref, set, update } from 'firebase/database';
 import { db } from '../config/firebase';
+import { db, firebaseAuthReady } from '../config/firebase';
 import { checkEsp32Health } from '../api.js';
 
 const stayFormatter = new Intl.DateTimeFormat('en-US', {
@@ -351,6 +352,8 @@ export default function AdminDashboard() {
   const monitoringStartedRef = useRef(false);
   const isMutedRef = useRef(false);
   const backfilledAlertPathsRef = useRef(new Set());
+  const assignmentsRef = useRef([]);
+  const esp32ConnectionStateRef = useRef('unknown');
   // null = "haven't seen a snapshot yet" - used so the very first Firebase
   // payload never gets treated as a batch of brand-new critical alerts.
   const previousAlertIdsRef = useRef(null);
@@ -362,6 +365,10 @@ export default function AdminDashboard() {
   useEffect(() => {
     isMutedRef.current = isMuted;
   }, [isMuted]);
+
+  useEffect(() => {
+    assignmentsRef.current = assignments;
+  }, [assignments]);
 
   // Create the Audio element once on mount.
   useEffect(() => {
@@ -383,6 +390,57 @@ export default function AdminDashboard() {
   useEffect(() => {
     let cancelled = false;
 
+    let active = true;
+
+    firebaseAuthReady
+      .then(() => {
+        if (active) {
+          setFirebaseStatus('ready');
+        }
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        setFirebaseStatus('error');
+        setFirebaseError(
+          error?.code === 'auth/operation-not-allowed'
+            ? 'Firebase anonymous auth is disabled. Enable Anonymous sign-in in Firebase Authentication.'
+            : 'Firebase authentication failed. Check the Firebase config and database access rules.'
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const updateAssignmentsByStatus = async (fromStatus, toStatus) => {
+      const targets = assignmentsRef.current.filter(
+        (assignment) => getAssignmentStatus(assignment) === fromStatus
+      );
+
+      if (targets.length === 0) {
+        return;
+      }
+
+      await Promise.all(
+        targets.map((assignment) =>
+          update(ref(db, `assignments/${assignment.id}`), {
+            status: toStatus
+          })
+        )
+      );
+    };
+
     const pollEsp32 = async () => {
       try {
         const result = await checkEsp32Health();
@@ -398,12 +456,41 @@ export default function AdminDashboard() {
               ? 'unconfigured'
               : 'offline'
         );
+        if (result.status === 'online') {
+          setEsp32Status('online');
+
+          if (esp32ConnectionStateRef.current !== 'online') {
+            esp32ConnectionStateRef.current = 'online';
+            await updateAssignmentsByStatus('Inactive', 'Active');
+          }
+
+          return;
+        }
+
+        if (result.status === 'unconfigured') {
+          setEsp32Status('unconfigured');
+          esp32ConnectionStateRef.current = 'unconfigured';
+          return;
+        }
+
+        setEsp32Status('offline');
+
+        if (esp32ConnectionStateRef.current !== 'offline') {
+          esp32ConnectionStateRef.current = 'offline';
+          await updateAssignmentsByStatus('Active', 'Inactive');
+        }
       } catch (error) {
         if (cancelled) {
           return;
         }
 
         setEsp32Status('offline');
+
+        if (esp32ConnectionStateRef.current !== 'offline') {
+          esp32ConnectionStateRef.current = 'offline';
+          await updateAssignmentsByStatus('Active', 'Inactive');
+        }
+
         console.error('ESP32 health poll failed:', error);
       }
     };
@@ -416,6 +503,7 @@ export default function AdminDashboard() {
       window.clearInterval(intervalId);
     };
   }, []);
+  }, [firebaseStatus]);
 
   const playCriticalAlarm = () => {
     const audio = audioRef.current;
@@ -593,6 +681,9 @@ export default function AdminDashboard() {
     const active = assignments.filter(
       (item) => getAssignmentStatus(item) === 'Active'
     ).length;
+    const inactive = assignments.filter(
+      (item) => getAssignmentStatus(item) === 'Inactive'
+    ).length;
     const returned = assignments.filter(
       (item) => getAssignmentStatus(item) === 'Returned'
     ).length;
@@ -600,10 +691,11 @@ export default function AdminDashboard() {
     const criticalAlerts = alerts.filter(
       (alert) => alert.status === 'Open' && alert.alertlevel === 'Critical'
     ).length;
-    const available = Math.max(totalInventory - active, 0);
+    const available = Math.max(totalInventory - active - inactive, 0);
 
     return {
       active,
+      inactive,
       returned,
       openAlerts,
       criticalAlerts,
@@ -825,6 +917,7 @@ export default function AdminDashboard() {
                   ? 'ESP32 connected'
                   : esp32Status === 'offline'
                     ? 'ESP32 offline'
+                      ? 'ESP32 offline - armbands marked inactive'
                     : 'ESP32 healthcheck not configured'}
               </span>
               <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
