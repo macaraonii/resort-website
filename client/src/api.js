@@ -32,6 +32,8 @@ export const fetchReservations = (params = {}) => {
   return request(`/reservations${suffix}`);
 };
 
+export const checkEsp32Health = () => request('/devices/esp32/health');
+
 export const updateReservationStatus = (id, status) =>
   request(`/reservations/${id}/status`, {
     method: 'PATCH',

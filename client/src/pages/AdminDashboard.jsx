@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { onValue, push, ref, set, update } from 'firebase/database';
+import { onValue, ref, set, update } from 'firebase/database';
 import { db } from '../config/firebase';
+import { checkEsp32Health } from '../api.js';
 
 const stayFormatter = new Intl.DateTimeFormat('en-US', {
   month: 'short',
@@ -38,7 +39,7 @@ const tabActiveStyles = {
   Major: 'bg-orange-400 text-white border-orange-400',
   Critical: 'bg-coral-500 text-white border-coral-500',
   Camera: 'bg-ocean-500 text-white border-ocean-500',
-  Wristband: 'bg-aqua-200 text-ocean-800 border-aqua-200'
+  Armband: 'bg-aqua-200 text-ocean-800 border-aqua-200'
 };
 
 // Badge shown when its tab is the active one (sits on top of the solid
@@ -49,7 +50,7 @@ const tabBadgeStyles = {
   Major: 'bg-white/25 text-white',
   Critical: 'bg-red-900 text-white',
   Camera: 'bg-white/20 text-white',
-  Wristband: 'bg-ocean-900/10 text-ocean-800'
+  Armband: 'bg-ocean-900/10 text-ocean-800'
 };
 
 // Badge shown when its tab is NOT active. Critical uses a solid dark-red
@@ -63,7 +64,7 @@ const inactiveTabBadgeStyles = {
   Major: 'bg-orange-100 text-orange-600',
   Critical: 'bg-red-600 text-white',
   Camera: 'bg-ocean-100 text-ocean-700',
-  Wristband: 'bg-aqua-100 text-ocean-700'
+  Armband: 'bg-aqua-100 text-ocean-700'
 };
 
 // Only two statuses exist in the Firebase schema - no "Acknowledged" state.
@@ -74,21 +75,23 @@ const alertStatusStyles = {
 
 const assignmentStatusStyles = {
   Active: 'bg-aqua-200 text-ocean-800',
+  Inactive: 'bg-amber-100 text-amber-700',
   Returned: 'bg-slate-200 text-slate-600'
 };
 
 const severityTabs = ['All', 'Minor', 'Major', 'Critical'];
 
-// NOTE: tab `id` values are internal routing keys, not displayed text - they
-// stay as-is. Only the `label` strings are user-facing.
 const mainTabs = [
   { id: 'dashboard', label: 'Dashboard' },
-  { id: 'wristbands', label: 'Armband Management' },
+  { id: 'armbands', label: 'Armband Management' },
   { id: 'alerts', label: 'Alert Logs' }
 ];
 
-const DEFAULT_WRISTBAND_INVENTORY = 150;
+const DEFAULT_ARMBAND_INVENTORY = 150;
 const CRITICAL_ALARM_SRC = '/critical-alarm.mp3';
+const ESP32_POLL_INTERVAL_MS = 10000;
+
+const getAssignmentStatus = (assignment) => assignment.status ?? 'Active';
 
 const formatStayRange = (start, end) => {
   if (!start || !end) {
@@ -247,8 +250,22 @@ const parseAssignments = (snapshotValue) => {
 
   return Object.entries(snapshotValue).map(([key, value]) => ({
     id: key,
+    status: value?.status ?? 'Active',
     ...value
   }));
+};
+
+const getNextAssignmentId = (currentAssignments) => {
+  const highestAssignmentNumber = currentAssignments.reduce((highest, assignment) => {
+    const match = String(assignment.id ?? '').match(/^GA(\d+)$/i);
+    if (!match) {
+      return highest;
+    }
+
+    return Math.max(highest, Number(match[1]));
+  }, 0);
+
+  return `GA${highestAssignmentNumber + 1}`;
 };
 
 const downloadAlertsAsCsv = (rows) => {
@@ -271,7 +288,7 @@ const downloadAlertsAsCsv = (rows) => {
         alert.alertID ?? '',
         alert.alertlevel,
         alert.guestName,
-        alert.wristbandNumber,
+        alert.armbandNumber,
         alert.cause,
         alert.reason,
         formatTime(alert.readAt),
@@ -299,17 +316,18 @@ export default function AdminDashboard() {
   const [assignments, setAssignments] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [totalInventory, setTotalInventory] = useState(
-    DEFAULT_WRISTBAND_INVENTORY
+    DEFAULT_ARMBAND_INVENTORY
   );
   const [search, setSearch] = useState('');
   const [activeAlertTab, setActiveAlertTab] = useState('All');
   const [activeMainTab, setActiveMainTab] = useState('dashboard');
   const [form, setForm] = useState({
-    guestName: '',
+    firstName: '',
+    lastName: '',
     age: '',
     stayStart: '',
     stayEnd: '',
-    wristbandNumber: ''
+    armbandID: ''
   });
   const [formError, setFormError] = useState('');
   // Tracks whether the Firebase write is currently in flight, so the
@@ -319,6 +337,7 @@ export default function AdminDashboard() {
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
   const [firebaseStatus, setFirebaseStatus] = useState('connecting');
   const [firebaseError, setFirebaseError] = useState('');
+  const [esp32Status, setEsp32Status] = useState('checking');
 
   // --- Audible critical-alarm state -----------------------------------
   const [monitoringStarted, setMonitoringStarted] = useState(false);
@@ -327,6 +346,8 @@ export default function AdminDashboard() {
   const monitoringStartedRef = useRef(false);
   const isMutedRef = useRef(false);
   const backfilledAlertPathsRef = useRef(new Set());
+  const assignmentsRef = useRef([]);
+  const esp32ConnectionStateRef = useRef('unknown');
   // null = "haven't seen a snapshot yet" - used so the very first Firebase
   // payload never gets treated as a batch of brand-new critical alerts.
   const previousAlertIdsRef = useRef(null);
@@ -339,6 +360,10 @@ export default function AdminDashboard() {
     isMutedRef.current = isMuted;
   }, [isMuted]);
 
+  useEffect(() => {
+    assignmentsRef.current = assignments;
+  }, [assignments]);
+
   // Create the Audio element once on mount.
   useEffect(() => {
     audioRef.current = new Audio(CRITICAL_ALARM_SRC);
@@ -348,6 +373,87 @@ export default function AdminDashboard() {
   useEffect(() => {
   setFirebaseStatus('ready');
 }, []);
+
+  useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const updateAssignmentsByStatus = async (fromStatus, toStatus) => {
+      const targets = assignmentsRef.current.filter(
+        (assignment) => getAssignmentStatus(assignment) === fromStatus
+      );
+
+      if (targets.length === 0) {
+        return;
+      }
+
+      await Promise.all(
+        targets.map((assignment) =>
+          update(ref(db, `assignments/${assignment.id}`), {
+            status: toStatus
+          })
+        )
+      );
+    };
+
+    const pollEsp32 = async () => {
+      try {
+        const result = await checkEsp32Health();
+
+        if (cancelled) {
+          return;
+        }
+
+        if (result.status === 'online') {
+          setEsp32Status('online');
+
+          if (esp32ConnectionStateRef.current !== 'online') {
+            esp32ConnectionStateRef.current = 'online';
+            await updateAssignmentsByStatus('Inactive', 'Active');
+          }
+
+          return;
+        }
+
+        if (result.status === 'unconfigured') {
+          setEsp32Status('unconfigured');
+          esp32ConnectionStateRef.current = 'unconfigured';
+          return;
+        }
+
+        setEsp32Status('offline');
+
+        if (esp32ConnectionStateRef.current !== 'offline') {
+          esp32ConnectionStateRef.current = 'offline';
+          await updateAssignmentsByStatus('Active', 'Inactive');
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setEsp32Status('offline');
+
+        if (esp32ConnectionStateRef.current !== 'offline') {
+          esp32ConnectionStateRef.current = 'offline';
+          await updateAssignmentsByStatus('Active', 'Inactive');
+        }
+
+        console.error('ESP32 health poll failed:', error);
+      }
+    };
+
+    void pollEsp32();
+    const intervalId = window.setInterval(pollEsp32, ESP32_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [firebaseStatus]);
 
   const playCriticalAlarm = () => {
     const audio = audioRef.current;
@@ -477,13 +583,13 @@ export default function AdminDashboard() {
     previousAlertIdsRef.current = new Set(alerts.map((alert) => alert.id));
   }, [alerts]);
 
-  // Live listener: /inventory/totalWristbands (optional path)
+  // Live listener: /inventory/totalArmbands (optional path)
   useEffect(() => {
     if (firebaseStatus !== 'ready') {
       return undefined;
     }
 
-    const inventoryRef = ref(db, 'inventory/totalWristbands');
+    const inventoryRef = ref(db, 'inventory/totalArmbands');
     const unsubscribe = onValue(inventoryRef, (snapshot) => {
       const value = snapshot.val();
       if (typeof value === 'number' && value > 0) {
@@ -501,7 +607,7 @@ export default function AdminDashboard() {
     };
 
     return assignments
-      .filter((item) => item.status === 'Active')
+      .filter((item) => getAssignmentStatus(item) === 'Active')
       .sort((a, b) => toTime(b.assignedAt) - toTime(a.assignedAt));
   }, [assignments]);
 
@@ -512,24 +618,31 @@ export default function AdminDashboard() {
     }
 
     return activeAssignments.filter((item) =>
-      `${item.guestName} ${item.wristbandNumber}`
+      `${item.fName ?? ''} ${item.lName ?? ''} ${item.armbandID ?? ''}`
         .toLowerCase()
         .includes(term)
     );
   }, [activeAssignments, search]);
 
   const totals = useMemo(() => {
-    const active = assignments.filter((item) => item.status === 'Active').length;
-    const returned = assignments.filter((item) => item.status === 'Returned')
-      .length;
+    const active = assignments.filter(
+      (item) => getAssignmentStatus(item) === 'Active'
+    ).length;
+    const inactive = assignments.filter(
+      (item) => getAssignmentStatus(item) === 'Inactive'
+    ).length;
+    const returned = assignments.filter(
+      (item) => getAssignmentStatus(item) === 'Returned'
+    ).length;
     const openAlerts = alerts.filter((alert) => alert.status === 'Open').length;
     const criticalAlerts = alerts.filter(
       (alert) => alert.status === 'Open' && alert.alertlevel === 'Critical'
     ).length;
-    const available = Math.max(totalInventory - active, 0);
+    const available = Math.max(totalInventory - active - inactive, 0);
 
     return {
       active,
+      inactive,
       returned,
       openAlerts,
       criticalAlerts,
@@ -544,7 +657,7 @@ export default function AdminDashboard() {
       Major: alerts.filter((alert) => alert.alertlevel === 'Major').length,
       Critical: alerts.filter((alert) => alert.alertlevel === 'Critical').length,
       Camera: alerts.filter((alert) => isCameraAlert(alert)).length,
-      Wristband: alerts.filter((alert) => !isCameraAlert(alert)).length
+      Armband: alerts.filter((alert) => !isCameraAlert(alert)).length
     };
   }, [alerts]);
 
@@ -556,7 +669,7 @@ export default function AdminDashboard() {
         ? alerts
         : activeAlertTab === 'Camera'
           ? alerts.filter((alert) => isCameraAlert(alert))
-          : activeAlertTab === 'Wristband'
+          : activeAlertTab === 'Armband'
             ? alerts.filter((alert) => !isCameraAlert(alert))
             : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
 
@@ -578,27 +691,22 @@ export default function AdminDashboard() {
       });
   }, [alerts]);
 
-  // Jumps from a Dashboard preview alert straight to the Alert Logs tab,
-  // pre-filtered to that alert's severity.
-  const handleViewAlertInLogs = (alertlevel) => {
-    setActiveAlertTab(alertlevel);
-    setActiveMainTab('alerts');
-  };
-
   const handleAssign = async (event) => {
     event.preventDefault();
     setFormError('');
 
-    const guestName = form.guestName.trim();
-    const wristbandNumber = form.wristbandNumber.trim().toUpperCase();
+    const firstName = form.firstName.trim();
+    const lastName = form.lastName.trim();
+    const armbandID = form.armbandID.trim().toUpperCase();
     const ageValue = Number(form.age);
 
     if (
-      !guestName ||
+      !firstName ||
+      !lastName ||
       !form.age ||
       !form.stayStart ||
       !form.stayEnd ||
-      !wristbandNumber
+      !armbandID
     ) {
       setFormError('Complete all fields before assigning an armband.');
       return;
@@ -617,8 +725,8 @@ export default function AdminDashboard() {
     if (
       assignments.some(
         (item) =>
-          item.wristbandNumber === wristbandNumber &&
-          item.status === 'Active'
+          item.armbandID === armbandID &&
+          getAssignmentStatus(item) !== 'Returned'
       )
     ) {
       setFormError('That armband is already assigned to an active guest.');
@@ -631,15 +739,16 @@ export default function AdminDashboard() {
     }
 
     const now = new Date();
+    const assignmentId = getNextAssignmentId(assignments);
     const newAssignment = {
-      guestName,
+      assignmentsID: assignmentId,
       age: ageValue,
+      assignedAt: now.toISOString(),
+      fName: firstName,
+      lName: lastName,
       stayStart: form.stayStart,
       stayEnd: form.stayEnd,
-      wristbandNumber,
-      status: 'Active',
-      assignedAt: now.toISOString(),
-      lastSeen: now.toISOString()
+      armbandID
     };
 
     // Guard against double submits (e.g. double click) while a write is
@@ -650,8 +759,7 @@ export default function AdminDashboard() {
 
     setIsSubmitting(true);
     try {
-      const assignmentsRef = ref(db, 'assignments');
-      const newAssignmentRef = push(assignmentsRef);
+      const newAssignmentRef = ref(db, `assignments/${assignmentId}`);
 
       console.log(
         '[handleAssign] writing to',
@@ -665,11 +773,12 @@ export default function AdminDashboard() {
       // successfully - if set() throws, this line never runs and the
       // catch block below takes over instead.
       setForm({
-        guestName: '',
+        firstName: '',
+        lastName: '',
         age: '',
         stayStart: '',
         stayEnd: '',
-        wristbandNumber: ''
+        armbandID: ''
       });
     } catch (error) {
       // This log is the important addition: without it, a
@@ -733,6 +842,22 @@ export default function AdminDashboard() {
                   : firebaseStatus === 'error'
                     ? 'Firebase feed unavailable'
                     : 'Connecting to Firebase...'}
+              </span>
+              <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
+                <span
+                  className={`flex h-2 w-2 rounded-full ${
+                    esp32Status === 'online'
+                      ? 'bg-emerald-500'
+                      : esp32Status === 'offline'
+                        ? 'bg-coral-500'
+                        : 'bg-sun-400'
+                  }`}
+                />
+                {esp32Status === 'online'
+                  ? 'ESP32 connected'
+                  : esp32Status === 'offline'
+                      ? 'ESP32 offline - armbands marked inactive'
+                    : 'ESP32 healthcheck not configured'}
               </span>
               <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
                 <span className="flex h-2 w-2 rounded-full bg-ocean-500" />
@@ -809,7 +934,7 @@ export default function AdminDashboard() {
                     {totals.openAlerts}
                   </span>
                 )}
-                {tab.id === 'wristbands' && (
+                {tab.id === 'armbands' && (
                   <span
                     className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
                       totals.available === 0
@@ -942,7 +1067,7 @@ export default function AdminDashboard() {
                             <p className="text-sm font-semibold text-slate-900">
                               {alert.guestName}
                               <span className="ml-2 text-xs font-normal text-slate-500">
-                                {alert.wristbandNumber}
+                                {alert.armbandNumber}
                               </span>
                               {alertIdLabel && (
                                 <span className="ml-2 text-[10px] font-normal text-slate-400">
@@ -959,16 +1084,13 @@ export default function AdminDashboard() {
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleViewAlertInLogs(alert.alertlevel)}
-                            className={`status-chip cursor-pointer transition hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-slate-400 ${
+                          <span
+                            className={`status-chip ${
                               alertStatusStyles[alert.status]
                             }`}
-                            title={`View all ${alert.alertlevel} alerts in Alert Logs`}
                           >
                             {alert.status}
-                          </button>
+                          </span>
                           <span className="text-xs text-slate-500">
                             {formatTime(alert.readAt)}
                           </span>
@@ -982,7 +1104,7 @@ export default function AdminDashboard() {
           </>
         )}
 
-        {activeMainTab === 'wristbands' && (
+        {activeMainTab === 'armbands' && (
           <section className="grid gap-8 lg:grid-cols-[1fr_1.2fr]">
             <div className="glass-panel p-6">
               <div className="flex items-start justify-between gap-4">
@@ -1012,21 +1134,38 @@ export default function AdminDashboard() {
                 onSubmit={handleAssign}
                 className="mt-6 grid gap-4 sm:grid-cols-2"
               >
-                <div className="sm:col-span-2">
+                <div>
                   <label className="text-xs font-semibold text-slate-500">
-                    Guest name
+                    First name
                   </label>
                   <input
                     type="text"
-                    value={form.guestName}
+                    value={form.firstName}
                     onChange={(event) =>
                       setForm((prev) => ({
                         ...prev,
-                        guestName: event.target.value
+                        firstName: event.target.value
                       }))
                     }
                     className="input-field"
-                    placeholder="Guest full name"
+                    placeholder="First name"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500">
+                    Last name
+                  </label>
+                  <input
+                    type="text"
+                    value={form.lastName}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        lastName: event.target.value
+                      }))
+                    }
+                    className="input-field"
+                    placeholder="Last name"
                   />
                 </div>
                 <div>
@@ -1049,15 +1188,15 @@ export default function AdminDashboard() {
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-500">
-                    Armband number
+                    Armband ID
                   </label>
                   <input
                     type="text"
-                    value={form.wristbandNumber}
+                    value={form.armbandID}
                     onChange={(event) =>
                       setForm((prev) => ({
                         ...prev,
-                        wristbandNumber: event.target.value
+                        armbandID: event.target.value
                       }))
                     }
                     className="input-field"
@@ -1146,30 +1285,31 @@ export default function AdminDashboard() {
                       <div className="flex flex-wrap items-start justify-between gap-4">
                         <div>
                           <p className="text-sm font-semibold text-slate-900">
-                            {assignment.guestName}
+                            {assignment.fName} {assignment.lName}
                             <span className="ml-2 text-xs text-slate-500">
                               Age {assignment.age}
                             </span>
                           </p>
                           <p className="mt-1 text-xs text-slate-500">
-                            Band {assignment.wristbandNumber} - Stay{' '}
+                                Armband {assignment.armbandID} - Stay{' '}
                             {formatStayRange(
                               assignment.stayStart,
                               assignment.stayEnd
                             )}
                           </p>
                           <p className="mt-1 text-xs text-slate-500">
-                            Last ping {formatTime(assignment.lastSeen)} -{' '}
-                            signal captured
+                                Assigned at {formatTime(assignment.assignedAt)}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
                           <span
                             className={`status-chip ${
-                              assignmentStatusStyles[assignment.status]
+                              assignmentStatusStyles[
+                                getAssignmentStatus(assignment)
+                              ]
                             }`}
                           >
-                            {assignment.status}
+                            {getAssignmentStatus(assignment)}
                           </span>
                           <button
                             type="button"
@@ -1196,7 +1336,7 @@ export default function AdminDashboard() {
                   Alert logs
                 </p>
                 <h2 className="mt-2 font-display text-2xl text-slate-900">
-                  Live wristband alerts
+                  Live armband alerts
                 </h2>
                 <p className="mt-2 text-xs text-slate-500">
                   Streaming from Firebase, sorted newest first.
@@ -1227,7 +1367,7 @@ export default function AdminDashboard() {
 
             {/* Severity and alert-type filter tabs */}
             <div className="mt-5 flex flex-wrap gap-2">
-              {[...severityTabs, 'Camera', 'Wristband'].map((tab) => {
+              {[...severityTabs, 'Camera', 'Armband'].map((tab) => {
                 const isActive = activeAlertTab === tab;
                 return (
                   <button
@@ -1310,7 +1450,7 @@ export default function AdminDashboard() {
                               {alert.guestName}
                             </p>
                             <p className="text-xs text-slate-500">
-                              {alert.wristbandNumber}
+                              {alert.armbandNumber}
                             </p>
                             {alertIdLabel && (
                               <p className="mt-0.5 text-[10px] font-medium text-slate-400">
