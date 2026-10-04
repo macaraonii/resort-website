@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { onValue, ref, set, update } from 'firebase/database';
+import { db } from '../config/firebase';
 import { db, firebaseAuthReady } from '../config/firebase';
 import { checkEsp32Health } from '../api.js';
 
@@ -73,6 +74,9 @@ const alertStatusStyles = {
   Resolved: 'bg-aqua-200/70 text-ocean-700'
 };
 
+// "Inactive" styling is kept so any pre-existing record from before this
+// fix still renders sensibly, but nothing in this file writes that status
+// anymore - see the ESP32 poll effect below.
 const assignmentStatusStyles = {
   Active: 'bg-aqua-200 text-ocean-800',
   Inactive: 'bg-amber-100 text-amber-700',
@@ -337,6 +341,8 @@ export default function AdminDashboard() {
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
   const [firebaseStatus, setFirebaseStatus] = useState('connecting');
   const [firebaseError, setFirebaseError] = useState('');
+  // Purely a display value - see the ESP32 poll effect below. Never used
+  // to mutate /assignments or any inventory math.
   const [esp32Status, setEsp32Status] = useState('checking');
 
   // --- Audible critical-alarm state -----------------------------------
@@ -371,6 +377,19 @@ export default function AdminDashboard() {
   }, []);
 
   useEffect(() => {
+  setFirebaseStatus('ready');
+}, []);
+
+  // ESP32 connectivity poll: READ-ONLY. This only ever calls setEsp32Status
+  // to drive the header badge/text. It must never touch Firebase, never
+  // write to /assignments, and must never factor into totals.available -
+  // an earlier version of this effect did exactly that (flipping
+  // assignment records to "Inactive" on disconnect, which silently ate
+  // into the armband inventory count while hiding those records from the
+  // "Guests currently monitored" list). Keep this effect display-only.
+  useEffect(() => {
+    let cancelled = false;
+
     let active = true;
 
     firebaseAuthReady
@@ -430,6 +449,13 @@ export default function AdminDashboard() {
           return;
         }
 
+        setEsp32Status(
+          result.status === 'online'
+            ? 'online'
+            : result.status === 'unconfigured'
+              ? 'unconfigured'
+              : 'offline'
+        );
         if (result.status === 'online') {
           setEsp32Status('online');
 
@@ -476,6 +502,7 @@ export default function AdminDashboard() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
+  }, []);
   }, [firebaseStatus]);
 
   const playCriticalAlarm = () => {
@@ -647,6 +674,9 @@ export default function AdminDashboard() {
     );
   }, [activeAssignments, search]);
 
+  // totals.available is driven solely by real assignment records with
+  // status "Active" against totalInventory - the ESP32 connectivity state
+  // never enters this calculation (see the poll effect above).
   const totals = useMemo(() => {
     const active = assignments.filter(
       (item) => getAssignmentStatus(item) === 'Active'
@@ -713,6 +743,13 @@ export default function AdminDashboard() {
         return byNewestFirst(a, b);
       });
   }, [alerts]);
+
+  // Jumps from a Dashboard preview alert straight to the Alert Logs tab,
+  // pre-filtered to that alert's severity.
+  const handleViewAlertInLogs = (alertlevel) => {
+    setActiveAlertTab(alertlevel);
+    setActiveMainTab('alerts');
+  };
 
   const handleAssign = async (event) => {
     event.preventDefault();
@@ -879,6 +916,7 @@ export default function AdminDashboard() {
                 {esp32Status === 'online'
                   ? 'ESP32 connected'
                   : esp32Status === 'offline'
+                    ? 'ESP32 offline'
                       ? 'ESP32 offline - armbands marked inactive'
                     : 'ESP32 healthcheck not configured'}
               </span>
@@ -1107,13 +1145,16 @@ export default function AdminDashboard() {
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-2">
-                          <span
-                            className={`status-chip ${
+                          <button
+                            type="button"
+                            onClick={() => handleViewAlertInLogs(alert.alertlevel)}
+                            className={`status-chip cursor-pointer transition hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-slate-400 ${
                               alertStatusStyles[alert.status]
                             }`}
+                            title={`View all ${alert.alertlevel} alerts in Alert Logs`}
                           >
                             {alert.status}
-                          </span>
+                          </button>
                           <span className="text-xs text-slate-500">
                             {formatTime(alert.readAt)}
                           </span>
