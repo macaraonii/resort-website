@@ -13,7 +13,7 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit'
 });
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------`----------------------------------
 // Firebase /alerts/{id} schema (normalized at the dashboard boundary):
 //   alertID      number | string (optional - raw payload id, display only)
 //   alertlevel   "Minor" | "Major" | "Critical"
