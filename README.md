@@ -21,7 +21,7 @@ customer booking flow, and an admin dashboard for managing reservations.
 ### 1) Backend API
 
 ```bash
-cd serverS
+cd server
 npm install
 npm run dev
 ```
