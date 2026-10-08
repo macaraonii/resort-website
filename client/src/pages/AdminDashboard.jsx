@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { onValue, ref, set, update } from 'firebase/database';
+import { get, onValue, ref, set, update } from 'firebase/database';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from 'recharts';
 import { db } from '../config/firebase';
 import { checkEsp32Health } from '../api.js';
 
@@ -13,7 +23,7 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit'
 });
 
-// -----------------------------------------`----------------------------------
+// ---------------------------------------------------------------------------
 // Firebase /alerts/{id} schema (normalized at the dashboard boundary):
 //   alertID      number | string (optional - raw payload id, display only)
 //   alertlevel   "Minor" | "Major" | "Critical"
@@ -30,8 +40,6 @@ const severityStyles = {
   Major: 'bg-orange-400 text-white',
   Minor: 'bg-sun-400 text-slate-900'
 };
-
-const severityOrder = { Critical: 0, Major: 1, Minor: 2 };
 
 const tabActiveStyles = {
   All: 'bg-slate-900 text-white border-slate-900',
@@ -73,12 +81,13 @@ const alertStatusStyles = {
   Resolved: 'bg-aqua-200/70 text-ocean-700'
 };
 
-// "Inactive" styling is kept so any pre-existing record from before this
-// fix still renders sensibly, but nothing in this file writes that status
-// anymore - see the ESP32 poll effect below.
+// Assignment lifecycle: Active -> Offline (no signal for 10+ minutes, but the
+// guest still holds the armband) -> Returned. Offline flips back to Active if
+// the armband starts reporting again. Only "Returned" frees an armband for a
+// new guest.
 const assignmentStatusStyles = {
   Active: 'bg-aqua-200 text-ocean-800',
-  Inactive: 'bg-amber-100 text-amber-700',
+  Offline: 'bg-amber-200 text-amber-900',
   Returned: 'bg-slate-200 text-slate-600'
 };
 
@@ -94,6 +103,50 @@ const DEFAULT_ARMBAND_INVENTORY = 150;
 const ARMBAND_PREFIX = 'CW';
 const CRITICAL_ALARM_SRC = '/critical-alarm.mp3';
 const ESP32_POLL_INTERVAL_MS = 10000;
+// An Active armband not heard from for longer than this is swept to Offline.
+const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000;
+
+// A Critical alert stays pinned to the top of the alert lists for this long
+// after it was read. The clock state below ticks so the pin expires live.
+const CRITICAL_PIN_WINDOW_MS = 5 * 60 * 1000;
+const CLOCK_TICK_MS = 30 * 1000;
+
+// Line colors for the hourly trend chart (hex so Recharts can use them
+// directly - Recharts can't read Tailwind class names).
+const TREND_COLORS = {
+  Minor: '#eab308',
+  Major: '#fb923c',
+  Critical: '#ef4444'
+};
+
+// Blink animation for open Critical alerts. Kept in the component so the
+// dashboard works without touching index.css or the Tailwind config.
+const CRITICAL_BLINK_CSS = `
+@keyframes critical-row-blink {
+  0%, 100% { background-color: #fee2e2; }
+  50% { background-color: #fca5a5; }
+}
+@keyframes critical-badge-blink {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.75); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+}
+.critical-blink-row {
+  animation: critical-row-blink 1s ease-in-out infinite;
+}
+.critical-blink-badge {
+  animation: critical-badge-blink 1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .critical-blink-row {
+    animation: none;
+    background-color: #fecaca;
+  }
+  .critical-blink-badge {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.5);
+  }
+}
+`;
 
 const formatArmbandId = (index) =>
   `${ARMBAND_PREFIX}${String(index).padStart(3, '0')}`;
@@ -101,7 +154,54 @@ const formatArmbandId = (index) =>
 const buildArmbandIds = (count = DEFAULT_ARMBAND_INVENTORY) =>
   Array.from({ length: count }, (_, index) => formatArmbandId(index + 1));
 
-const getAssignmentStatus = (assignment) => assignment.status ?? 'Active';
+// Records written by the old ESP32 poll used status "Inactive" for what is now
+// "Offline", so both read as Offline here.
+const getAssignmentStatus = (assignment) => {
+  const status = assignment.status ?? 'Active';
+  return status === 'Inactive' ? 'Offline' : status;
+};
+
+// An assignment that is Active or Offline still holds its armband. Only
+// "Returned" releases it.
+const isHeldAssignment = (assignment) => {
+  const status = getAssignmentStatus(assignment);
+  return status === 'Active' || status === 'Offline';
+};
+
+// Last time the armband was heard from, in ms. Prefers lastSeen (ISO string,
+// epoch ms, or epoch seconds from the ESP32) and falls back to assignedAt so
+// a brand-new assignment gets a full 10 minutes before it can be swept.
+// Returns null when neither field is usable.
+const getAssignmentSeenMs = (assignment) => {
+  const rawLastSeen = toTimestamp(assignment.lastSeen);
+  if (Number.isFinite(rawLastSeen)) {
+    return rawLastSeen > 0 && rawLastSeen < 1e11 ? rawLastSeen * 1000 : rawLastSeen;
+  }
+
+  const assignedAt = toTimestamp(assignment.assignedAt);
+  return Number.isFinite(assignedAt) ? assignedAt : null;
+};
+
+const formatLastSeen = (seenMs, nowMs) => {
+  if (seenMs === null) {
+    return 'never';
+  }
+
+  const minutes = Math.floor(Math.max(nowMs - seenMs, 0) / 60000);
+  if (minutes < 1) {
+    return 'just now';
+  }
+  if (minutes < 60) {
+    return `${minutes} min ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours} h ago`;
+  }
+
+  return `${Math.floor(hours / 24)} d ago`;
+};
 
 const formatStayRange = (start, end) => {
   if (!start || !end) {
@@ -136,6 +236,7 @@ const isCameraAlert = (alert) =>
   String(alert?.cause ?? '')
     .toLowerCase()
     .includes('camera');
+
 const toTimestamp = (value) => {
   if (typeof value === 'number') {
     return value;
@@ -194,14 +295,91 @@ const normalizeAlertRecord = (id, value = {}) => {
   };
 };
 
-// Newest-first comparator using the realtime readAt value.
+// Millisecond timestamp for an alert, preferring readAtMs and falling back
+// to readAt. Returns -Infinity when neither can be parsed.
+const getAlertMs = (alert) => toTimestamp(alert?.readAtMs ?? alert?.readAt);
+
+// Newest-first comparator using the realtime readAtMs value.
 const byNewestFirst = (a, b) => {
-  const timeDiff = toTimestamp(b.readAt) - toTimestamp(a.readAt);
-  if (timeDiff !== 0) {
-    return timeDiff;
+  const aMs = getAlertMs(a);
+  const bMs = getAlertMs(b);
+
+  if (aMs !== bMs) {
+    return bMs > aMs ? 1 : -1;
   }
 
   return b.id.localeCompare(a.id);
+};
+
+// An alert blinks for as long as it is a Critical alert that is still Open.
+// Resolving it (status -> "Resolved") is the only thing that stops it.
+const isBlinkingAlert = (alert) =>
+  alert.alertlevel === 'Critical' && alert.status === 'Open';
+
+// A Critical, Open alert is pinned to the top only while it is younger than
+// CRITICAL_PIN_WINDOW_MS. After that it sorts chronologically like the rest.
+const isPinnedCritical = (alert, nowMs) =>
+  isBlinkingAlert(alert) && nowMs - getAlertMs(alert) < CRITICAL_PIN_WINDOW_MS;
+
+const byPinThenNewest = (nowMs) => (a, b) => {
+  const aPinned = isPinnedCritical(a, nowMs);
+  const bPinned = isPinnedCritical(b, nowMs);
+
+  if (aPinned !== bPinned) {
+    return aPinned ? -1 : 1;
+  }
+
+  return byNewestFirst(a, b);
+};
+
+// Buckets today's alerts (local time) into 24 hourly points for the trend
+// chart. Hours that haven't happened yet are null so the lines stop at the
+// current hour instead of dropping to zero.
+const buildHourlyTrend = (alerts, nowMs) => {
+  const now = new Date(nowMs);
+  const startOfDay = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate()
+  ).getTime();
+  const endOfDay = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + 1
+  ).getTime();
+  const currentHour = now.getHours();
+
+  const buckets = Array.from({ length: 24 }, (_, hour) => {
+    const startValue = hour <= currentHour ? 0 : null;
+    return {
+      hour,
+      label: `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`,
+      Minor: startValue,
+      Major: startValue,
+      Critical: startValue
+    };
+  });
+
+  let total = 0;
+
+  alerts.forEach((alert) => {
+    const ms = getAlertMs(alert);
+    const level = alert.alertlevel;
+
+    if (!Number.isFinite(ms) || ms < startOfDay || ms >= endOfDay) {
+      return;
+    }
+
+    if (!(level in TREND_COLORS)) {
+      return;
+    }
+
+    const bucket = buckets[new Date(ms).getHours()];
+    bucket[level] = (bucket[level] ?? 0) + 1;
+    total += 1;
+  });
+
+  return { buckets, total };
 };
 
 // Firebase Realtime Database can store alerts either directly under /alerts
@@ -347,9 +525,13 @@ export default function AdminDashboard() {
   const [lastSync, setLastSync] = useState(() => new Date().toISOString());
   const [firebaseStatus, setFirebaseStatus] = useState('connecting');
   const [firebaseError, setFirebaseError] = useState('');
-  // Purely a display value - see the ESP32 poll effect below. Never used
-  // to mutate /assignments or any inventory math.
+  // The health poll also reconciles active assignments when the ESP32 is
+  // unavailable, so this state reflects the latest connection result.
   const [esp32Status, setEsp32Status] = useState('checking');
+  // Live clock. Ticking this state re-renders the component so the 5-minute
+  // Critical pin expires while the operator is watching, even if no new
+  // Firebase data arrives.
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   // --- Audible critical-alarm state -----------------------------------
   const [monitoringStarted, setMonitoringStarted] = useState(false);
@@ -376,42 +558,45 @@ export default function AdminDashboard() {
     audioRef.current.preload = 'auto';
   }, []);
 
+  // Clock tick: re-render every 30 seconds so time-based sorting and the
+  // hourly chart stay current.
   useEffect(() => {
-  setFirebaseStatus('ready');
-}, []);
+    const intervalId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, CLOCK_TICK_MS);
 
-  // ESP32 connectivity poll: READ-ONLY. This only ever calls setEsp32Status
-  // to drive the header badge/text. It must never touch Firebase, never
-  // write to /assignments, and must never factor into totals.available -
-  // an earlier version of this effect did exactly that (flipping
-  // assignment records to "Inactive" on disconnect, which silently ate
-  // into the armband inventory count while hiding those records from the
-  // "Guests currently monitored" list). Keep this effect display-only.
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    setFirebaseStatus('ready');
+  }, []);
+
+  // ESP32 connectivity poll. Display only: it drives the status dot in the
+  // header and never writes to Firebase. Per-armband offline detection is the
+  // lastSeen sweep further down, so one failed health check can't flip every
+  // guest at once.
   useEffect(() => {
     let cancelled = false;
 
     const pollEsp32 = async () => {
       try {
         const result = await checkEsp32Health();
-
-        if (cancelled) {
-          return;
-        }
-
-        setEsp32Status(
+        const nextStatus =
           result.status === 'online'
             ? 'online'
             : result.status === 'unconfigured'
               ? 'unconfigured'
-              : 'offline'
-        );
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
+              : 'offline';
 
-        setEsp32Status('offline');
-        console.error('ESP32 health poll failed:', error);
+        if (!cancelled) {
+          setEsp32Status(nextStatus);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setEsp32Status('offline');
+          console.error('ESP32 health poll failed:', error);
+        }
       }
     };
 
@@ -472,6 +657,53 @@ export default function AdminDashboard() {
 
     return () => unsubscribe();
   }, [firebaseStatus]);
+
+  // Auto-offline sweep. Runs whenever assignments change and on every clock
+  // tick. An Active armband with no signal for more than OFFLINE_THRESHOLD_MS
+  // is flipped to Offline in Firebase; an Offline one that is reporting again
+  // flips back to Active. The writes are idempotent: once statuses match
+  // reality there is nothing left to update, so the re-run triggered by the
+  // listener is a no-op.
+  useEffect(() => {
+    if (firebaseStatus !== 'ready') {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const statusUpdates = {};
+
+    assignments.forEach((assignment) => {
+      const status = getAssignmentStatus(assignment);
+      if (status !== 'Active' && status !== 'Offline') {
+        return;
+      }
+
+      const seenMs = getAssignmentSeenMs(assignment);
+      if (seenMs === null) {
+        return;
+      }
+
+      const isStale = nowMs - seenMs > OFFLINE_THRESHOLD_MS;
+
+      if (status === 'Active' && isStale) {
+        statusUpdates[`assignments/${assignment.id}/status`] = 'Offline';
+      } else if (status === 'Offline' && !isStale) {
+        statusUpdates[`assignments/${assignment.id}/status`] = 'Active';
+      }
+    });
+
+    if (Object.keys(statusUpdates).length > 0) {
+      update(ref(db), statusUpdates).catch((error) => {
+        if (!cancelled) {
+          console.error('Offline sweep failed:', error);
+        }
+      });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [assignments, nowMs, firebaseStatus]);
 
   // Live listener: /alerts
   useEffect(() => {
@@ -569,19 +801,21 @@ export default function AdminDashboard() {
     return () => unsubscribe();
   }, [firebaseStatus]);
 
-  const activeAssignments = useMemo(() => {
+  // Every assignment that still holds an armband: Active, or Offline (signal
+  // lost but the guest hasn't been marked Returned). Newest first.
+  const monitoredAssignments = useMemo(() => {
     const toTime = (value) => {
       const parsed = value ? new Date(value).getTime() : NaN;
       return Number.isNaN(parsed) ? 0 : parsed;
     };
 
     return assignments
-      .filter((item) => getAssignmentStatus(item) === 'Active')
+      .filter(isHeldAssignment)
       .sort((a, b) => toTime(b.assignedAt) - toTime(a.assignedAt));
   }, [assignments]);
 
-  const activeAssignmentsByArmband = useMemo(() => {
-    return activeAssignments.reduce((map, assignment) => {
+  const heldAssignmentsByArmband = useMemo(() => {
+    return monitoredAssignments.reduce((map, assignment) => {
       const armbandId = String(assignment.armbandID ?? '').trim().toUpperCase();
 
       if (!armbandId || map.has(armbandId)) {
@@ -591,23 +825,24 @@ export default function AdminDashboard() {
       map.set(armbandId, assignment);
       return map;
     }, new Map());
-  }, [activeAssignments]);
+  }, [monitoredAssignments]);
 
   const armbandOptions = useMemo(() => {
     return buildArmbandIds().map((armbandID) => {
-      const activeAssignment = activeAssignmentsByArmband.get(armbandID);
-      const guestName = activeAssignment
-        ? `${activeAssignment.fName ?? ''} ${activeAssignment.lName ?? ''}`.trim()
+      const holder = heldAssignmentsByArmband.get(armbandID);
+      const guestName = holder
+        ? `${holder.fName ?? ''} ${holder.lName ?? ''}`.trim()
         : '';
 
       return {
         armbandID,
-        status: activeAssignment ? 'Active' : 'Inactive',
-        guestName,
-        activeAssignment
+        holder,
+        holderStatus: holder ? getAssignmentStatus(holder) : null,
+        isHeld: Boolean(holder),
+        guestName
       };
     });
-  }, [activeAssignmentsByArmband]);
+  }, [heldAssignmentsByArmband]);
 
   const selectedArmbandOption = useMemo(() => {
     const normalizedId = form.armbandID.trim().toUpperCase();
@@ -620,29 +855,31 @@ export default function AdminDashboard() {
   }, [armbandOptions, form.armbandID]);
 
   const availableArmbandOptions = useMemo(
-    () => armbandOptions.filter((option) => option.status === 'Inactive'),
+    () => armbandOptions.filter((option) => !option.isHeld),
     [armbandOptions]
   );
 
   const filteredAssignments = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) {
-      return activeAssignments;
+      return monitoredAssignments;
     }
 
-    return activeAssignments.filter((item) =>
+    return monitoredAssignments.filter((item) =>
       `${item.fName ?? ''} ${item.lName ?? ''} ${item.armbandID ?? ''}`
         .toLowerCase()
         .includes(term)
     );
-  }, [activeAssignments, search]);
+  }, [monitoredAssignments, search]);
 
-  // totals.available is driven solely by real assignment records with
-  // status "Active" against totalInventory - the ESP32 connectivity state
-  // never enters this calculation (see the poll effect above).
+  // Armbands held by a guest (Active or Offline) are unavailable until the
+  // guest is marked Returned.
   const totals = useMemo(() => {
     const active = assignments.filter(
       (item) => getAssignmentStatus(item) === 'Active'
+    ).length;
+    const offline = assignments.filter(
+      (item) => getAssignmentStatus(item) === 'Offline'
     ).length;
     const returned = assignments.filter(
       (item) => getAssignmentStatus(item) === 'Returned'
@@ -651,10 +888,11 @@ export default function AdminDashboard() {
     const criticalAlerts = alerts.filter(
       (alert) => alert.status === 'Open' && alert.alertlevel === 'Critical'
     ).length;
-    const available = Math.max(totalInventory - active, 0);
+    const available = Math.max(totalInventory - active - offline, 0);
 
     return {
       active,
+      offline,
       returned,
       openAlerts,
       criticalAlerts,
@@ -673,8 +911,10 @@ export default function AdminDashboard() {
     };
   }, [alerts]);
 
-  // Alert Logs table: a log history reads strictly newest-first, so
-  // severity and alert-type filters only narrow which rows show up.
+  // Alert Logs table: severity and alert-type filters only narrow which rows
+  // show up. Ordering is "pinned fresh Criticals first (under 5 minutes old),
+  // then strictly newest first". nowMs is a dependency so the pin expires on
+  // the clock tick.
   const filteredAlerts = useMemo(() => {
     const byFilter =
       activeAlertTab === 'All'
@@ -685,23 +925,21 @@ export default function AdminDashboard() {
             ? alerts.filter((alert) => !isCameraAlert(alert))
             : alerts.filter((alert) => alert.alertlevel === activeAlertTab);
 
-    return [...byFilter].sort(byNewestFirst);
-  }, [alerts, activeAlertTab]);
+    return [...byFilter].sort(byPinThenNewest(nowMs));
+  }, [alerts, activeAlertTab, nowMs]);
 
-  // Dashboard preview: grouped by severity (Critical, then Major, then
-  // Minor), and within each group the newest alert sits on top.
+  // Dashboard preview: open alerts only, same ordering as the log table.
   const openAlertsPreview = useMemo(() => {
     return alerts
       .filter((alert) => alert.status === 'Open')
-      .sort((a, b) => {
-        const severityDiff =
-          severityOrder[a.alertlevel] - severityOrder[b.alertlevel];
-        if (severityDiff !== 0) {
-          return severityDiff;
-        }
-        return byNewestFirst(a, b);
-      });
-  }, [alerts]);
+      .sort(byPinThenNewest(nowMs));
+  }, [alerts, nowMs]);
+
+  // Today's alerts bucketed by hour for the trend chart.
+  const hourlyTrend = useMemo(
+    () => buildHourlyTrend(alerts, nowMs),
+    [alerts, nowMs]
+  );
 
   // Jumps from a Dashboard preview alert straight to the Alert Logs tab,
   // pre-filtered to that alert's severity.
@@ -746,31 +984,6 @@ export default function AdminDashboard() {
       return;
     }
 
-    if (selectedArmbandOption.status === 'Active') {
-      setFormError(
-        `That armband is already assigned to ${selectedArmbandOption.guestName || 'another guest'}.`
-      );
-      return;
-    }
-
-    if (totals.available <= 0) {
-      setFormError('No armbands available - process a return before assigning.');
-      return;
-    }
-
-    const now = new Date();
-    const assignmentId = getNextAssignmentId(assignments);
-    const newAssignment = {
-      assignmentsID: assignmentId,
-      age: ageValue,
-      assignedAt: now.toISOString(),
-      fName: firstName,
-      lName: lastName,
-      stayStart: form.stayStart,
-      stayEnd: form.stayEnd,
-      armbandID
-    };
-
     // Guard against double submits (e.g. double click) while a write is
     // already in flight.
     if (isSubmitting) {
@@ -779,6 +992,46 @@ export default function AdminDashboard() {
 
     setIsSubmitting(true);
     try {
+      // Validate against a fresh read of /assignments instead of local state,
+      // so a stale tab or a second operator can't double-assign an armband or
+      // reuse an assignment id.
+      const latestSnapshot = await get(ref(db, 'assignments'));
+      const latestAssignments = parseAssignments(latestSnapshot.val());
+
+      const currentHolder = latestAssignments.find(
+        (item) =>
+          isHeldAssignment(item) &&
+          String(item.armbandID ?? '').trim().toUpperCase() === armbandID
+      );
+
+      if (currentHolder) {
+        const holderName = `${currentHolder.fName ?? ''} ${currentHolder.lName ?? ''}`.trim();
+        setFormError(
+          `${armbandID} is still assigned to ${holderName || 'another guest'} (${getAssignmentStatus(currentHolder)}). Mark that guest as returned first.`
+        );
+        return;
+      }
+
+      const heldCount = latestAssignments.filter(isHeldAssignment).length;
+      if (totalInventory - heldCount <= 0) {
+        setFormError('No armbands available - process a return before assigning.');
+        return;
+      }
+
+      const now = new Date();
+      const assignmentId = getNextAssignmentId(latestAssignments);
+      const newAssignment = {
+        assignmentsID: assignmentId,
+        age: ageValue,
+        assignedAt: now.toISOString(),
+        lastSeen: now.toISOString(),
+        status: 'Active',
+        fName: firstName,
+        lName: lastName,
+        stayStart: form.stayStart,
+        stayEnd: form.stayEnd,
+        armbandID
+      };
       const newAssignmentRef = ref(db, `assignments/${assignmentId}`);
 
       console.log(
@@ -845,6 +1098,7 @@ export default function AdminDashboard() {
 
   return (
     <div className="min-h-screen">
+      <style>{CRITICAL_BLINK_CSS}</style>
       <header className="border-b border-white/60 bg-white/70 backdrop-blur">
         <div className="mx-auto flex flex-wrap items-center justify-between gap-4 px-6 py-4 sm:px-10 lg:px-20">
           <div className="space-y-1">
@@ -873,11 +1127,6 @@ export default function AdminDashboard() {
                         : 'bg-sun-400'
                   }`}
                 />
-                {esp32Status === 'online'
-                  ? 'ESP32 connected'
-                  : esp32Status === 'offline'
-                    ? 'ESP32 offline'
-                    : 'ESP32 healthcheck not configured'}
               </span>
               <span className="flex items-center gap-1.5 font-semibold text-ocean-700">
                 <span className="flex h-2 w-2 rounded-full bg-ocean-500" />
@@ -989,7 +1238,8 @@ export default function AdminDashboard() {
                   {totals.active}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  {totals.available} available of {totalInventory}
+                  {totals.offline} offline, {totals.available} available of{' '}
+                  {totalInventory}
                 </p>
               </div>
               <div className="glass-panel signal-grid relative overflow-hidden p-6 rise-in rise-delay-1">
@@ -1032,14 +1282,101 @@ export default function AdminDashboard() {
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold text-slate-500">
+                    Alert trend
+                  </p>
+                  <h2 className="mt-2 font-display text-2xl text-slate-900">
+                    Incidents by hour today
+                  </h2>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Counts every alert received today, open or resolved.
+                  </p>
+                </div>
+                <div className="status-chip bg-slate-900/5 text-slate-600">
+                  {hourlyTrend.total} today
+                </div>
+              </div>
+
+              <div className="mt-6 h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={hourlyTrend.buckets}
+                    margin={{ top: 8, right: 16, bottom: 0, left: -16 }}
+                  >
+                    <CartesianGrid
+                      stroke="#e2e8f0"
+                      strokeDasharray="3 3"
+                      vertical={false}
+                    />
+                    <XAxis
+                      dataKey="label"
+                      interval={2}
+                      tick={{ fontSize: 11, fill: '#64748b' }}
+                      tickLine={false}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                    />
+                    <YAxis
+                      allowDecimals={false}
+                      domain={[0, (dataMax) => Math.max(dataMax, 3)]}
+                      tick={{ fontSize: 11, fill: '#64748b' }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        borderRadius: 12,
+                        border: '1px solid #e2e8f0',
+                        fontSize: 12
+                      }}
+                    />
+                    <Legend
+                      iconType="circle"
+                      wrapperStyle={{ fontSize: 12 }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="Minor"
+                      stroke={TREND_COLORS.Minor}
+                      strokeWidth={2}
+                      dot={{ r: 2 }}
+                      activeDot={{ r: 5 }}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="Major"
+                      stroke={TREND_COLORS.Major}
+                      strokeWidth={2}
+                      dot={{ r: 2 }}
+                      activeDot={{ r: 5 }}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="Critical"
+                      stroke={TREND_COLORS.Critical}
+                      strokeWidth={2.5}
+                      dot={{ r: 3 }}
+                      activeDot={{ r: 6 }}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+
+            <section className="glass-panel p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500">
                     Quick overview
                   </p>
                   <h2 className="mt-2 font-display text-2xl text-slate-900">
                     Live &amp; open emergencies
                   </h2>
                   <p className="mt-2 text-xs text-slate-500">
-                    Grouped by severity, newest first within each group. Full
-                    history lives in Alert Logs.
+                    New Critical alerts stay pinned on top for 5 minutes, then
+                    everything sorts newest first. Full history lives in Alert
+                    Logs.
                   </p>
                 </div>
                 <button
@@ -1059,6 +1396,7 @@ export default function AdminDashboard() {
                 ) : (
                   openAlertsPreview.map((alert) => {
                     const isCritical = alert.alertlevel === 'Critical';
+                    const isBlinking = isBlinkingAlert(alert);
                     const alertIdLabel = formatAlertId(alert.alertID);
                     return (
                       <div
@@ -1067,15 +1405,15 @@ export default function AdminDashboard() {
                           isCritical
                             ? 'border-coral-300 bg-[#fee2e2] shadow-sm'
                             : 'border-slate-200/60 bg-white/80'
-                        }`}
+                        } ${isBlinking ? 'critical-blink-row' : ''}`}
                       >
                         <div className="flex items-start gap-3">
                           <span
                             className={`status-chip ${
                               severityStyles[alert.alertlevel]
-                            }`}
+                            } ${isBlinking ? 'critical-blink-badge' : ''}`}
                           >
-                            {isCritical && (
+                            {isBlinking && (
                               <span className="relative mr-1 inline-flex h-2 w-2">
                                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
                                 <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
@@ -1225,15 +1563,15 @@ export default function AdminDashboard() {
                   >
                     <option value="">Select an armband</option>
                     {armbandOptions.map((option) => {
-                      const optionLabel = option.activeAssignment
-                        ? `${option.armbandID} - Active - ${option.guestName || 'Assigned guest'}`
-                        : `${option.armbandID} - Inactive`;
+                      const optionLabel = option.isHeld
+                        ? `${option.armbandID} - ${option.holderStatus} - ${option.guestName || 'Assigned guest'}`
+                        : `${option.armbandID} - Free`;
 
                       return (
                         <option
                           key={option.armbandID}
                           value={option.armbandID}
-                          disabled={option.status === 'Active'}
+                          disabled={option.isHeld}
                         >
                           {optionLabel}
                         </option>
@@ -1241,8 +1579,9 @@ export default function AdminDashboard() {
                     })}
                   </select>
                   <p className="mt-2 text-xs text-slate-500">
-                    {availableArmbandOptions.length} inactive armbands are available. Active
-                    armbands are disabled and show the guest currently assigned.
+                    {availableArmbandOptions.length} armbands are free. An armband
+                    assigned to a guest, active or offline, stays disabled until
+                    that guest is marked returned.
                   </p>
                 </div>
                 <div>
@@ -1296,7 +1635,7 @@ export default function AdminDashboard() {
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold text-slate-500">
-                    Active armbands
+                    {totals.active} active, {totals.offline} offline
                   </p>
                   <h2 className="mt-2 font-display text-2xl text-slate-900">
                     Guests currently monitored
@@ -1316,54 +1655,79 @@ export default function AdminDashboard() {
               <div className="mt-6 space-y-3">
                 {filteredAssignments.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-                    No active armbands match your search.
+                    No armbands match your search.
                   </div>
                 ) : (
-                  filteredAssignments.map((assignment) => (
-                    <div
-                      key={assignment.id}
-                      className="rounded-2xl border border-slate-200/60 bg-white/80 p-4"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-4">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">
-                            {assignment.fName} {assignment.lName}
-                            <span className="ml-2 text-xs text-slate-500">
-                              Age {assignment.age}
+                  filteredAssignments.map((assignment) => {
+                    const status = getAssignmentStatus(assignment);
+                    const isOffline = status === 'Offline';
+                    const lastSeenLabel = formatLastSeen(
+                      getAssignmentSeenMs(assignment),
+                      nowMs
+                    );
+
+                    return (
+                      <div
+                        key={assignment.id}
+                        className={`rounded-2xl border p-4 ${
+                          isOffline
+                            ? 'border-amber-300 border-l-4 border-l-amber-500 bg-amber-50'
+                            : 'border-slate-200/60 bg-white/80'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-900">
+                              {assignment.fName} {assignment.lName}
+                              <span className="ml-2 text-xs text-slate-500">
+                                Age {assignment.age}
+                              </span>
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500">
+                              Armband {assignment.armbandID} - Stay{' '}
+                              {formatStayRange(
+                                assignment.stayStart,
+                                assignment.stayEnd
+                              )}
+                            </p>
+                            <p
+                              className={`mt-1 flex items-center gap-1.5 text-xs ${
+                                isOffline
+                                  ? 'font-semibold text-amber-800'
+                                  : 'text-slate-500'
+                              }`}
+                            >
+                              <span
+                                className={`h-2 w-2 rounded-full ${
+                                  isOffline ? 'bg-amber-500' : 'bg-emerald-500'
+                                }`}
+                              />
+                              {isOffline
+                                ? `No signal, last seen ${lastSeenLabel}`
+                                : `Last seen ${lastSeenLabel}`}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500">
+                              Assigned at {formatTime(assignment.assignedAt)}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`status-chip ${assignmentStatusStyles[status]}`}
+                            >
+                              {status}
                             </span>
-                          </p>
-                          <p className="mt-1 text-xs text-slate-500">
-                                Armband {assignment.armbandID} - Stay{' '}
-                            {formatStayRange(
-                              assignment.stayStart,
-                              assignment.stayEnd
-                            )}
-                          </p>
-                          <p className="mt-1 text-xs text-slate-500">
-                                Assigned at {formatTime(assignment.assignedAt)}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`status-chip ${
-                              assignmentStatusStyles[
-                                getAssignmentStatus(assignment)
-                              ]
-                            }`}
-                          >
-                            {getAssignmentStatus(assignment)}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => handleReturn(assignment.id)}
-                            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
-                          >
-                            Mark returned
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => handleReturn(assignment.id)}
+                              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                            >
+                              Mark returned
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -1381,7 +1745,8 @@ export default function AdminDashboard() {
                   Live armband alerts
                 </h2>
                 <p className="mt-2 text-xs text-slate-500">
-                  Streaming from Firebase, sorted newest first.
+                  Streaming from Firebase, newest first. New Critical alerts
+                  stay pinned on top for 5 minutes.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -1458,6 +1823,7 @@ export default function AdminDashboard() {
                   <tbody className="text-slate-600">
                     {filteredAlerts.map((alert) => {
                       const isCritical = alert.alertlevel === 'Critical';
+                      const isBlinking = isBlinkingAlert(alert);
                       const alertIdLabel = formatAlertId(alert.alertID);
                       return (
                         <tr
@@ -1466,15 +1832,15 @@ export default function AdminDashboard() {
                             isCritical
                               ? 'border-coral-300 border-l-coral-500 bg-[#fee2e2]'
                               : 'border-slate-200/60 border-l-transparent'
-                          }`}
+                          } ${isBlinking ? 'critical-blink-row' : ''}`}
                         >
                           <td className="py-3 pl-1 pr-4 align-top">
                             <span
                               className={`status-chip ${
                                 severityStyles[alert.alertlevel]
-                              }`}
+                              } ${isBlinking ? 'critical-blink-badge' : ''}`}
                             >
-                              {isCritical && (
+                              {isBlinking && (
                                 <span className="relative mr-1 inline-flex h-2 w-2">
                                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
                                   <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
