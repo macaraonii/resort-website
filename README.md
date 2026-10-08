@@ -1,7 +1,4 @@
-# Caribbean Waves Waterpark Resort Reservation System
-
-A full-stack prototype reservation system with a tropical, family-friendly UI,
-customer booking flow, and an admin dashboard for managing reservations.
+# AquaGuard Monitoring System
 
 ## Tech Stack
 
@@ -40,14 +37,6 @@ Visit http://localhost:5173 to view the prototype.
 
 ## Admin Login (Prototype)
 
-- Username: admin
-- Password: waves2026
 
-Credentials can be changed in server/.env (see server/.env.example).
 
-## Notes
 
-- The Vite config exposes the logo from res/ using public assets.
-- The database is created automatically in server/data/ on first run.
-- Sample rooms, cottages, and reservations are seeded for testing.
-- Payment processing is a prototype only and does not charge real users.
