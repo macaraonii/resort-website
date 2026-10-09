@@ -10,6 +10,25 @@ import {
   XAxis,
   YAxis
 } from 'recharts';
+import {
+  eachDayOfInterval,
+  eachHourOfInterval,
+  eachMonthOfInterval,
+  endOfDay,
+  endOfMonth,
+  endOfWeek,
+  endOfYear,
+  format,
+  isAfter,
+  isSameDay,
+  isSameMonth,
+  isSameWeek,
+  isSameYear,
+  startOfDay,
+  startOfMonth,
+  startOfWeek,
+  startOfYear
+} from 'date-fns';
 import { db } from '../config/firebase';
 import { checkEsp32Health } from '../api.js';
 
@@ -332,54 +351,127 @@ const byPinThenNewest = (nowMs) => (a, b) => {
   return byNewestFirst(a, b);
 };
 
-// Buckets today's alerts (local time) into 24 hourly points for the trend
-// chart. Hours that haven't happened yet are null so the lines stop at the
-// current hour instead of dropping to zero.
-const buildHourlyTrend = (alerts, nowMs) => {
-  const now = new Date(nowMs);
-  const startOfDay = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate()
-  ).getTime();
-  const endOfDay = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate() + 1
-  ).getTime();
-  const currentHour = now.getHours();
+// Weeks run Monday to Sunday.
+const WEEK_OPTIONS = { weekStartsOn: 1 };
 
-  const buckets = Array.from({ length: 24 }, (_, hour) => {
-    const startValue = hour <= currentHour ? 0 : null;
+const TREND_RANGE_OPTIONS = [
+  { value: 'today', label: 'Today' },
+  { value: 'week', label: 'This Week' },
+  { value: 'month', label: 'This Month' },
+  { value: 'year', label: 'This Year' }
+];
+
+// One entry per dropdown option. Each describes the current period (via
+// date-fns), how to split it into X-axis buckets, and how to label them.
+//   contains     - is this alert inside the current period?
+//   getBuckets   - start date of every bucket in the period
+//   keyOf        - maps a date to the bucket it belongs to
+//   labelOf      - short X-axis tick label
+//   tooltipOf    - longer label shown in the tooltip
+//   xAxisInterval- how many ticks to skip so labels never overlap
+const TREND_RANGE_CONFIG = {
+  today: {
+    groupLabel: 'hour',
+    periodLabel: 'today',
+    xAxisInterval: 2,
+    describe: (now) => format(now, 'EEEE, MMM d, yyyy'),
+    contains: (date, now) => isSameDay(date, now),
+    getBuckets: (now) =>
+      eachHourOfInterval({ start: startOfDay(now), end: endOfDay(now) }),
+    keyOf: (date) => format(date, 'yyyy-MM-dd-HH'),
+    labelOf: (date) => format(date, 'h a'),
+    tooltipOf: (date) => format(date, 'MMM d, h a')
+  },
+  week: {
+    groupLabel: 'day',
+    periodLabel: 'this week',
+    xAxisInterval: 0,
+    describe: (now) =>
+      `${format(startOfWeek(now, WEEK_OPTIONS), 'MMM d')} - ${format(
+        endOfWeek(now, WEEK_OPTIONS),
+        'MMM d, yyyy'
+      )}`,
+    contains: (date, now) => isSameWeek(date, now, WEEK_OPTIONS),
+    getBuckets: (now) =>
+      eachDayOfInterval({
+        start: startOfWeek(now, WEEK_OPTIONS),
+        end: endOfWeek(now, WEEK_OPTIONS)
+      }),
+    keyOf: (date) => format(date, 'yyyy-MM-dd'),
+    labelOf: (date) => format(date, 'EEE'),
+    tooltipOf: (date) => format(date, 'EEEE, MMM d')
+  },
+  month: {
+    groupLabel: 'day',
+    periodLabel: 'this month',
+    xAxisInterval: 1,
+    describe: (now) => format(now, 'MMMM yyyy'),
+    contains: (date, now) => isSameMonth(date, now),
+    getBuckets: (now) =>
+      eachDayOfInterval({ start: startOfMonth(now), end: endOfMonth(now) }),
+    keyOf: (date) => format(date, 'yyyy-MM-dd'),
+    labelOf: (date) => format(date, 'd'),
+    tooltipOf: (date) => format(date, 'EEEE, MMM d')
+  },
+  year: {
+    groupLabel: 'month',
+    periodLabel: 'this year',
+    xAxisInterval: 0,
+    describe: (now) => format(now, 'yyyy'),
+    contains: (date, now) => isSameYear(date, now),
+    getBuckets: (now) =>
+      eachMonthOfInterval({ start: startOfYear(now), end: endOfYear(now) }),
+    keyOf: (date) => format(date, 'yyyy-MM'),
+    labelOf: (date) => format(date, 'MMM'),
+    tooltipOf: (date) => format(date, 'MMMM yyyy')
+  }
+};
+
+// Filters alerts to the selected current period and counts Minor / Major /
+// Critical per bucket for the trend chart. Buckets that haven't started yet
+// stay null so the lines stop at the present instead of dropping to zero.
+const buildAlertTrend = (alerts, nowMs, range) => {
+  const config = TREND_RANGE_CONFIG[range] ?? TREND_RANGE_CONFIG.today;
+  const now = new Date(nowMs);
+
+  const buckets = config.getBuckets(now).map((bucketStart) => {
+    const initialCount = isAfter(bucketStart, now) ? null : 0;
     return {
-      hour,
-      label: `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`,
-      Minor: startValue,
-      Major: startValue,
-      Critical: startValue
+      key: config.keyOf(bucketStart),
+      label: config.labelOf(bucketStart),
+      tooltipLabel: config.tooltipOf(bucketStart),
+      Minor: initialCount,
+      Major: initialCount,
+      Critical: initialCount
     };
   });
 
+  const bucketsByKey = new Map(buckets.map((bucket) => [bucket.key, bucket]));
   let total = 0;
 
   alerts.forEach((alert) => {
     const ms = getAlertMs(alert);
     const level = alert.alertlevel;
 
-    if (!Number.isFinite(ms) || ms < startOfDay || ms >= endOfDay) {
+    if (!Number.isFinite(ms) || !(level in TREND_COLORS)) {
       return;
     }
 
-    if (!(level in TREND_COLORS)) {
+    const alertDate = new Date(ms);
+    if (!config.contains(alertDate, now)) {
       return;
     }
 
-    const bucket = buckets[new Date(ms).getHours()];
+    const bucket = bucketsByKey.get(config.keyOf(alertDate));
+    if (!bucket) {
+      return;
+    }
+
     bucket[level] = (bucket[level] ?? 0) + 1;
     total += 1;
   });
 
-  return { buckets, total };
+  return { buckets, total, rangeText: config.describe(now) };
 };
 
 // Firebase Realtime Database can store alerts either directly under /alerts
@@ -509,6 +601,7 @@ export default function AdminDashboard() {
   const [search, setSearch] = useState('');
   const [activeAlertTab, setActiveAlertTab] = useState('All');
   const [activeMainTab, setActiveMainTab] = useState('dashboard');
+  const [trendRange, setTrendRange] = useState('today');
   const [form, setForm] = useState({
     firstName: '',
     lastName: '',
@@ -935,11 +1028,13 @@ export default function AdminDashboard() {
       .sort(byPinThenNewest(nowMs));
   }, [alerts, nowMs]);
 
-  // Today's alerts bucketed by hour for the trend chart.
-  const hourlyTrend = useMemo(
-    () => buildHourlyTrend(alerts, nowMs),
-    [alerts, nowMs]
+  // Alerts filtered to the selected period and bucketed for the trend chart.
+  // nowMs is a dependency so the chart rolls forward on the clock tick.
+  const alertTrend = useMemo(
+    () => buildAlertTrend(alerts, nowMs, trendRange),
+    [alerts, nowMs, trendRange]
   );
+  const trendConfig = TREND_RANGE_CONFIG[trendRange] ?? TREND_RANGE_CONFIG.today;
 
   // Jumps from a Dashboard preview alert straight to the Alert Logs tab,
   // pre-filtered to that alert's severity.
@@ -1285,21 +1380,52 @@ export default function AdminDashboard() {
                     Alert trend
                   </p>
                   <h2 className="mt-2 font-display text-2xl text-slate-900">
-                    Incidents by hour today
+                    Incidents by {trendConfig.groupLabel}
                   </h2>
                   <p className="mt-2 text-xs text-slate-500">
-                    Counts every alert received today, open or resolved.
+                    {alertTrend.rangeText}. Counts every alert received in this
+                    period, open or resolved.
                   </p>
                 </div>
-                <div className="status-chip bg-slate-900/5 text-slate-600">
-                  {hourlyTrend.total} today
+                <div className="flex items-center gap-2">
+                  <div className="status-chip bg-slate-900/5 text-slate-600">
+                    {alertTrend.total} {trendConfig.periodLabel}
+                  </div>
+                  <div className="relative">
+                    <select
+                      aria-label="Chart time range"
+                      value={trendRange}
+                      onChange={(event) => setTrendRange(event.target.value)}
+                      className="cursor-pointer appearance-none rounded-full border border-slate-200 bg-white py-1.5 pl-3.5 pr-8 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                    >
+                      {TREND_RANGE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      aria-hidden="true"
+                      className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </div>
                 </div>
               </div>
 
               <div className="mt-6 h-72 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart
-                    data={hourlyTrend.buckets}
+                    key={trendRange}
+                    data={alertTrend.buckets}
                     margin={{ top: 8, right: 16, bottom: 0, left: -16 }}
                   >
                     <CartesianGrid
@@ -1309,7 +1435,7 @@ export default function AdminDashboard() {
                     />
                     <XAxis
                       dataKey="label"
-                      interval={2}
+                      interval={trendConfig.xAxisInterval}
                       tick={{ fontSize: 11, fill: '#64748b' }}
                       tickLine={false}
                       axisLine={{ stroke: '#cbd5e1' }}
@@ -1322,6 +1448,9 @@ export default function AdminDashboard() {
                       axisLine={false}
                     />
                     <Tooltip
+                      labelFormatter={(label, payload) =>
+                        payload?.[0]?.payload?.tooltipLabel ?? label
+                      }
                       contentStyle={{
                         borderRadius: 12,
                         border: '1px solid #e2e8f0',
@@ -1362,6 +1491,11 @@ export default function AdminDashboard() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
+              {alertTrend.total === 0 && (
+                <p className="mt-3 text-center text-xs text-slate-500">
+                  No alerts recorded {trendConfig.periodLabel}.
+                </p>
+              )}
             </section>
 
             <section className="glass-panel p-6">
